@@ -1,0 +1,335 @@
+<sdf version='1.10'>
+  <world name='default'>
+    <scene>
+      <ambient>0.300000012 0.300000012 0.300000012 1</ambient>
+      <background>0.300000012 0.300000012 0.300000012 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <gravity>0 0 -9.8000000000000007</gravity>
+    <magnetic_field>5.5644999999999998e-06 2.2875799999999999e-05 -4.2388400000000002e-05</magnetic_field>
+    <atmosphere type='adiabatic'/>
+    <physics type='ode'>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+    <model name='ground'>
+      <static>true</static>
+      <link name='link'>
+        <pose>0 0 -0.050000000000000003 0 0 0</pose>
+        <visual name='visual'>
+          <geometry>
+            <box>
+              <size>20 20 0.10000000000000001</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.400000006 0.400000006 0.400000006 1</ambient>
+            <diffuse>0.800000012 0.800000012 0.800000012 1</diffuse>
+          </material>
+        </visual>
+        <collision name='collision'>
+          <geometry>
+            <box>
+              <size>20 20 0.10000000000000001</size>
+            </box>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>1</iyy>
+            <iyz>0</iyz>
+            <izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <pose>0 0 0 0 0 0</pose>
+      <self_collide>false</self_collide>
+    </model>
+    <model name='robot_with_camera'>
+      <!-- 平移底盘: x 关节(连世界) → chassis_x → y 关节 → chassis_y -->
+      <!-- 转向关节 base_yaw_joint 挂在 chassis_y 上, 使前进/后退可沿任意朝向 -->
+      <link name='chassis_x'>
+        <inertial>
+          <mass>0.001</mass>
+          <inertia>
+            <ixx>1e-06</ixx><iyy>1e-06</iyy><izz>1e-06</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+          <pose>0 0 0 0 0 0</pose>
+        </inertial>
+      </link>
+      <joint name='drive_x_joint' type='prismatic'>
+        <parent>world</parent>
+        <child>chassis_x</child>
+        <axis>
+          <xyz>1 0 0</xyz>
+          <limit>
+            <lower>-9</lower>
+            <upper>9</upper>
+          </limit>
+          <dynamics>
+            <damping>1.0</damping>
+            <friction>0</friction>
+          </dynamics>
+        </axis>
+      </joint>
+      <link name='chassis_y'>
+        <inertial>
+          <mass>0.001</mass>
+          <inertia>
+            <ixx>1e-06</ixx><iyy>1e-06</iyy><izz>1e-06</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+          <pose>0 0 0 0 0 0</pose>
+        </inertial>
+      </link>
+      <joint name='drive_y_joint' type='prismatic'>
+        <parent>chassis_x</parent>
+        <child>chassis_y</child>
+        <axis>
+          <xyz>0 1 0</xyz>
+          <limit>
+            <lower>-9</lower>
+            <upper>9</upper>
+          </limit>
+          <dynamics>
+            <damping>1.0</damping>
+            <friction>0</friction>
+          </dynamics>
+        </axis>
+      </joint>
+      <link name='base'>
+        <pose>0 0 0.074999999999999997 0 0 0</pose>
+        <inertial>
+          <mass>0.5</mass>
+          <inertia>
+            <ixx>0.01</ixx>
+            <iyy>0.01</iyy>
+            <izz>0.01</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
+          </inertia>
+          <pose>0 0 0 0 0 0</pose>
+        </inertial>
+        <visual name='base_visual'>
+          <geometry>
+            <box>
+              <size>0.29999999999999999 0.29999999999999999 0.14999999999999999</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.5 0.400000006 0.300000012 1</ambient>
+            <diffuse>0.699999988 0.600000024 0.400000006 1</diffuse>
+          </material>
+        </visual>
+        <collision name='base_collision'>
+          <geometry>
+            <box>
+              <size>0.29999999999999999 0.29999999999999999 0.14999999999999999</size>
+            </box>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <enable_wind>false</enable_wind>
+      </link>
+      <joint name='base_yaw_joint' type='revolute'>
+        <parent>chassis_y</parent>
+        <child>base</child>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <dynamics>
+            <damping>5</damping>
+            <friction>0</friction>
+          </dynamics>
+        </axis>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+      <link name='cylinder'>
+        <inertial>
+          <mass>0.0001</mass>
+          <inertia>
+            <ixx>9.9999999999999995e-07</ixx>
+            <iyy>9.9999999999999995e-07</iyy>
+            <izz>9.9999999999999995e-07</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
+          </inertia>
+          <pose>0 0 0 0 0 0</pose>
+        </inertial>
+        <visual name='cylinder_visual'>
+          <geometry>
+            <cylinder>
+              <radius>0.080000000000000002</radius>
+              <length>0.59999999999999998</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.200000003 0.5 0.800000012 1</ambient>
+            <diffuse>0.300000012 0.600000024 0.899999976 1</diffuse>
+          </material>
+        </visual>
+        <collision name='cylinder_collision'>
+          <geometry>
+            <cylinder>
+              <radius>0.080000000000000002</radius>
+              <length>0.59999999999999998</length>
+            </cylinder>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name='rotation_marker'>
+          <pose>0.10000000000000001 0 0.28000000000000003 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.040000000000000001 0.040000000000000001 0.040000000000000001</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 1 0 1</ambient>
+            <diffuse>1 1 0 1</diffuse>
+          </material>
+        </visual>
+        <sensor name='camera' type='camera'>
+          <pose>0.10000000000000001 0 0.28000000000000003 0 0 0</pose>
+          <topic>/camera</topic>
+          <update_rate>30</update_rate>
+          <enable_metrics>false</enable_metrics>
+          <camera name='__default__'>
+            <pose>0 0 0 0 0 0</pose>
+            <horizontal_fov>1.0469999999999999</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>RGB_INT8</format>
+              <anti_aliasing>4</anti_aliasing>
+            </image>
+            <camera_info_topic>__default__</camera_info_topic>
+            <trigger_topic></trigger_topic>
+            <triggered>false</triggered>
+            <clip>
+              <near>0.10000000000000001</near>
+              <far>100</far>
+            </clip>
+            <save enabled='false'>
+              <path>__default__</path>
+            </save>
+            <visibility_mask>4294967295</visibility_mask>
+            <noise>
+              <type>none</type>
+              <mean>0</mean>
+              <stddev>0</stddev>
+            </noise>
+            <distortion>
+              <k1>0</k1>
+              <k2>0</k2>
+              <k3>0</k3>
+              <p1>0</p1>
+              <p2>0</p2>
+              <center>0.5 0.5</center>
+            </distortion>
+            <lens>
+              <type>stereographic</type>
+              <scale_to_hfov>true</scale_to_hfov>
+              <cutoff_angle>1.5707963267948966</cutoff_angle>
+              <env_texture_size>256</env_texture_size>
+            </lens>
+            <optical_frame_id></optical_frame_id>
+          </camera>
+        </sensor>
+        <pose>0 0 0 0 0 0</pose>
+        <enable_wind>false</enable_wind>
+      </link>
+      <joint name='camera_joint' type='fixed'>
+        <parent>base</parent>
+        <child>cylinder</child>
+        <pose>0 0 0.17500000000000004 0 0 0</pose>
+      </joint>
+      <plugin name='gz::sim::systems::JointPositionController' filename='gz-sim-joint-position-controller-system'>
+        <joint_name>base_yaw_joint</joint_name>
+        <topic>camera_joint_controller/commands</topic>
+        <p_gain>15.0</p_gain>
+        <i_gain>0.0</i_gain>
+        <d_gain>20.0</d_gain>
+      </plugin>
+      <plugin name='gz::sim::systems::JointStatePublisher' filename='gz-sim-joint-state-publisher-system'>
+        <topic>joint_state</topic>
+        <joint_name>base_yaw_joint</joint_name>
+      </plugin>
+      <plugin name='gz::sim::systems::JointPositionController' filename='gz-sim-joint-position-controller-system'>
+        <joint_name>drive_x_joint</joint_name>
+        <topic>drive_x/commands</topic>
+        <p_gain>30.0</p_gain>
+        <i_gain>0.0</i_gain>
+        <d_gain>10.0</d_gain>
+      </plugin>
+      <plugin name='gz::sim::systems::JointPositionController' filename='gz-sim-joint-position-controller-system'>
+        <joint_name>drive_y_joint</joint_name>
+        <topic>drive_y/commands</topic>
+        <p_gain>30.0</p_gain>
+        <i_gain>0.0</i_gain>
+        <d_gain>10.0</d_gain>
+      </plugin>
+      <plugin name='gz::sim::systems::Sensors' filename='gz-sim-sensors-system'/>
+      <pose>0 0 0 0 0 0</pose>
+      <static>false</static>
+      <self_collide>false</self_collide>
+    </model>
+    <include>
+      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
+      <name>prius_hybrid</name>
+      <pose>4.7399296760558949 4.5714282989495638 0.01264973599772235 -3.3808915731029282e-08 2.3397734559909374e-12 8.9350098963611641e-08</pose>
+    </include>
+    <include>
+      <uri>file:///root/gz_ros/mod/walking person</uri>
+      <name>person_walking</name>
+      <pose>4.6140275001525879 -0.0059126601554453373 0.099999227882671946 0 0 0</pose>
+    </include>
+    <light name='sun' type='directional'>
+      <pose>0 0 10 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.5 0.10000000000000001 -1</direction>
+      <diffuse>0.899999976 0.899999976 0.899999976 1</diffuse>
+      <specular>0.300000012 0.300000012 0.300000012 1</specular>
+      <attenuation>
+        <range>10</range>
+        <linear>1</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot>
+        <inner_angle>0</inner_angle>
+        <outer_angle>0</outer_angle>
+        <falloff>0</falloff>
+      </spot>
+    </light>
+  </world>
+</sdf>

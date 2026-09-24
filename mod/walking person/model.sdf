@@ -1,0 +1,52 @@
+<?xml version="1.0" ?>
+<sdf version="1.10">
+    <model name="person_walking">
+        <pose>0 0 0 0 0 0</pose>  <!-- 模型整体初始位置和姿态 -->
+        <link name="link">
+            <pose>0 0 0 0 0 0</pose>  <!-- 连杆相对位置 -->
+            <inertial>
+                <pose>0 0 0.55 0 0 0</pose>  <!-- 质心位置，旋转为0 -->
+                <mass>80.0</mass>
+                <inertia>
+                    <ixx>27.82</ixx>
+                    <ixy>0</ixy>
+                    <ixz>0</ixz>
+                    <iyy>24.88</iyy>
+                    <iyz>0</iyz>
+                    <izz>4.57</izz>
+                </inertia>
+            </inertial>
+
+            <!-- 脚底碰撞 -->
+            <collision name="bottom">
+                <pose>0 0 0.01 0 0 0</pose>  <!-- 位置和旋转 -->
+                <geometry>
+                    <box>
+                        <size>0.35 0.75 0.02</size>
+                    </box>
+                </geometry>
+            </collision>
+
+            <!-- 身体简化碰撞 -->
+            <collision name="body">
+                <pose>0 0 0.55 0 0 0</pose>  <!-- 身体中心 -->
+                <geometry>
+                    <capsule>
+                        <radius>0.25</radius>
+                        <length>0.8</length>
+                    </capsule>
+                </geometry>
+            </collision>
+
+            <!-- 视觉网格 -->
+            <visual name="visual">
+                <pose>0 0 -0.02 0 0 0</pose>  <!-- 微调视觉与碰撞对齐 -->
+                <geometry>
+                    <mesh>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/walking person/3/files/meshes/walking.dae</uri>
+                    </mesh>
+                </geometry>
+            </visual>
+        </link>
+    </model>
+</sdf>
