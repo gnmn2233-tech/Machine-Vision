@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'obstacle_avoider = obstacle_avoider.obstacle_avoider:main',
+            'depth_probe = obstacle_avoider.depth_probe:main',
         ],
     },
 )

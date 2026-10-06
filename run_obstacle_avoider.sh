@@ -27,6 +27,8 @@ ensure_bridge() {
 }
 ensure_bridge /camera_joint_controller/commands '/camera_joint_controller/commands@std_msgs/msg/Float64]gz.msgs.Double'
 ensure_bridge /joint_states '/joint_state@sensor_msgs/msg/JointState[gz.msgs.Model' -r '/joint_state:=/joint_states'
+# 深度图桥: 节点靠它拿距离; 断了也不致命(会退回 YOLO 规则), 但最好保活
+ensure_bridge /depth_camera '/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image'
 
 # LLM 后端: 本地优先 + 云端兜底 (failover)
 #  主: 本地 LM Studio qwen2.5-7b-instruct-1m (GPU 推理 ~0.5s, 零成本)

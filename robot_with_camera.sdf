@@ -231,7 +231,8 @@
               <format>RGB_INT8</format>
               <anti_aliasing>4</anti_aliasing>
             </image>
-            <camera_info_topic>__default__</camera_info_topic>
+            <!-- RGB 内参让位到 /camera/camera_info: 深度相机的内参固定发在 /camera_info, 避免抢同一话题 -->
+            <camera_info_topic>/camera/camera_info</camera_info_topic>
             <trigger_topic></trigger_topic>
             <triggered>false</triggered>
             <clip>
@@ -262,6 +263,37 @@
               <env_texture_size>256</env_texture_size>
             </lens>
             <optical_frame_id></optical_frame_id>
+          </camera>
+        </sensor>
+        <!-- 深度相机: 与 RGB 同位置/同视场, 画面与 /camera 像素对齐; R_FLOAT32 单位米, 未命中为 inf。
+             话题 /depth_camera(深度图) 与 /depth_camera/points(点云, 默认不桥接); 避障节点据此
+             算 左/中/右 三区最近距离并发布 /nearest_obstacle -->
+        <sensor name='depth_camera' type='depth_camera'>
+          <pose>0.10000000000000001 0 0.28000000000000003 0 0 0</pose>
+          <topic>/depth_camera</topic>
+          <update_rate>15</update_rate>
+          <enable_metrics>false</enable_metrics>
+          <camera name='__default__'>
+            <pose>0 0 0 0 0 0</pose>
+            <horizontal_fov>1.0469999999999999</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R_FLOAT32</format>
+            </image>
+            <!-- Harmonic 的 depth_camera 不解析 camera_info_topic, 内参固定发 /camera_info, 桥接时 remap 改名 -->
+            <clip>
+              <near>0.10000000000000001</near>
+              <far>20</far>
+            </clip>
+            <noise>
+              <type>none</type>
+              <mean>0</mean>
+              <stddev>0</stddev>
+            </noise>
+            <depth_camera>
+              <output>depths</output>
+            </depth_camera>
           </camera>
         </sensor>
         <pose>0 0 0 0 0 0</pose>

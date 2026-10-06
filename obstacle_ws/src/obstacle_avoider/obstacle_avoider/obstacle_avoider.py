@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""障碍物避障 / 相机转向节点 (v2 可靠版)。
+"""障碍物避障 / 相机转向节点。
 
 决策原则:
   1. 相机看到障碍在左 -> 向右转(看开); 障碍在右 -> 向左转; 无碍 -> 停。
   2. 确定性规则优先; 模型只在"两侧都有障碍 / 仅中间有障碍"这类模糊场景做补充决策。
      模型失败或未配置时自动用规则兜底, 节点永远可用。
   3. 角度符号: 正值 -> 相机向左, 负值 -> 相机向右 (与 base_yaw_joint +z 轴一致)。
+
+深度测距 (深度相机 /depth_camera, 32FC1 米, 与 /camera 同位置同视场像素对齐):
+  - 每个像素先按"地面期望深度"剔除地面(相机水平固定高度, 每行地面深度是定值),
+    剩下的近处像素才算障碍, 再按 左/中/右 三区取最近距离。
+  - 深度能测出"多远", 所以深度规则优先于 YOLO: 一侧贴脸就不往那侧转、
+    三区都远则视为空旷。深度不可用时自动回落 YOLO 规则, 行为与不带深度时一致。
+  - 对外发布: /nearest_obstacle (Float64 米, inf=前方空旷) 与 /obstacle_zones
+    (Float32MultiArray [左, 中, 右] 米), 供键盘/大模型/后续导航模块取用。
+  - YOLO 检测框用深度图中位数测距, 距离一并喂给模型。
 
 模型后端 (环境变量配置, 只依赖 requests):
   本地优先 + 云端兜底 (故障转移):
@@ -31,13 +40,14 @@ import threading
 import time
 
 import cv2
+import numpy as np
 import requests
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Float32MultiArray, Float64
 from yolo_msgs.msg import DetectionArray
 
 ROTATE_STEP = 0.03        # 每周期(0.04s)的目标角增量, 控制转速
@@ -48,6 +58,19 @@ LEFT_PERCENT = 0.4
 RIGHT_PERCENT = 0.6
 LLM_TIMEOUT = 30
 MAX_IMAGE_W = 512
+
+# ---- 深度测距 (depth camera) ----
+DEPTH_TOPIC = '/depth_camera'
+DEPTH_TIMEOUT = 1.0       # 秒: 深度图超时未更新 -> 视为无深度, 回落 YOLO 规则
+# 相机光心离地高度(米); 相机位置/机器人装配变了要同步改, 否则地面会被算成贴脸障碍。
+CAM_HEIGHT = 0.28
+CAM_HFOV = 1.047          # 相机水平视场 (与 SDF 中 horizontal_fov 一致)
+GROUND_RATIO = 0.75       # 像素深度 < 地面期望深度 * 该比例 -> 判为障碍(否则是地面)
+ZONE_NEAR = 1.5           # 米: 该距离内视为近处障碍, 需要让开
+ZONE_CLEAR = 3.0          # 米: 三区都比它远 -> 视为前方空旷
+STOP_DIST = 0.5           # 米: 贴脸距离, 绝不转向该侧
+SIDE_MARGIN = 0.3         # 米: 两侧距离差小于它视为"相当"
+DEPTH_PERCENTILE = 10.0   # 每区取该百分位作为最近障碍距离(抗离群像素)
 
 
 class SmoothYaw:
@@ -101,7 +124,17 @@ class ObstacleAvoider(Node):
         self.bridge = CvBridge()
         self.latest_image = None
         self.image_width = 640
+        self.image_height = 480
         self._objects = []
+        self._object_dists = []         # 与 _objects 一一对应的障碍距离(米, inf=没测到)
+
+        # 深度测距状态: 左/中/右三区最近障碍距离(米, inf=该区无近处障碍)
+        self.latest_depth = None
+        self.depth_zones = (math.inf, math.inf, math.inf)
+        self.depth_stamp = 0.0
+        self.depth_action = None        # 深度规则动作
+        self._depth_warned = False
+        self._yolo_action = None        # YOLO 规则动作(深度不可用时的兜底)
 
         # 无极丝滑转向: 角度无限累积不 wrap, 发布角限速逼近目标
         self.smooth = SmoothYaw(max_rate=ROTATE_STEP / 0.04, accel=10.0, dt=0.04)
@@ -126,9 +159,12 @@ class ObstacleAvoider(Node):
         qos = QoSProfile(depth=5, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         self.det_sub = self.create_subscription(DetectionArray, '/yolo/detections', self.on_detections, qos)
         self.img_sub = self.create_subscription(Image, '/camera', self.on_image, 10)
+        self.depth_sub = self.create_subscription(Image, DEPTH_TOPIC, self.on_depth, qos)
         self.js_sub = self.create_subscription(JointState, '/joint_states', self.on_joint_states, qos)
         self.ov_sub = self.create_subscription(Float64, '/avoider_override', self.on_override, 10)
         self.cmd_pub = self.create_publisher(Float64, '/camera_joint_controller/commands', 10)
+        self.dist_pub = self.create_publisher(Float64, '/nearest_obstacle', 10)
+        self.zones_pub = self.create_publisher(Float32MultiArray, '/obstacle_zones', 10)
         self.timer = self.create_timer(0.04, self.tick)
 
         self.provider = self._detect_provider()
@@ -198,6 +234,7 @@ class ObstacleAvoider(Node):
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.image_width = max(img.shape[1], 1)
+            self.image_height = max(img.shape[0], 1)
             if img.shape[1] > MAX_IMAGE_W:
                 h = int(img.shape[0] * MAX_IMAGE_W / img.shape[1])
                 img = cv2.resize(img, (MAX_IMAGE_W, max(h, 1)))
@@ -205,8 +242,119 @@ class ObstacleAvoider(Node):
         except Exception:
             pass
 
+    # ---------------- 深度测距 ----------------
+    def _depth_ok(self):
+        """深度数据是否新鲜: 桥断了/没起深度相机时自动失效, 退回 YOLO 规则。"""
+        return self.depth_stamp > 0.0 and (time.time() - self.depth_stamp) < DEPTH_TIMEOUT
+
+    def on_depth(self, msg):
+        """深度图 -> 左/中/右三区最近障碍距离, 并发布测距话题。
+
+        先剔除地面: 相机水平且离地高度固定, 每一像素行对应一个确定的地面深度
+        (越靠画面下方越近), 深度不小于"地面期望"的像素就是地面本身。
+        这样画面下部不会把脚下的地面当成障碍, 矮障碍也仍能被测到。
+        """
+        try:
+            arr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+        except Exception:
+            try:
+                arr = self.bridge.imgmsg_to_cv2(msg)
+            except Exception:
+                return
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim != 2 or arr.size == 0:
+            return
+        self.latest_depth = arr
+        h, w = arr.shape[:2]
+
+        rows = np.arange(h, dtype=np.float32)
+        ground = CAM_HEIGHT * ((w / 2.0) / math.tan(CAM_HFOV / 2.0)) / np.maximum(rows - h / 2.0, 1e-3)
+        obstacle = np.isfinite(arr) & (arr > 0.0) & (rows[:, None] <= h / 2.0)
+        below = rows > h / 2.0
+        obstacle[below] |= (arr[below] < ground[below, None] * GROUND_RATIO)
+
+        xl, xr = int(w * LEFT_PERCENT), int(w * RIGHT_PERCENT)
+        zones = (
+            self._zone_dist(arr[:, :xl], obstacle[:, :xl]),
+            self._zone_dist(arr[:, xl:xr], obstacle[:, xl:xr]),
+            self._zone_dist(arr[:, xr:], obstacle[:, xr:]),
+        )
+        self.depth_zones = zones
+        self.depth_stamp = time.time()
+        self.depth_action = self._depth_rule(zones)
+        self.rule_action = self._fuse_rules()
+
+        m = Float64()
+        m.data = float(min(zones))
+        self.dist_pub.publish(m)
+        z = Float32MultiArray()
+        z.data = [float(v) for v in zones]
+        self.zones_pub.publish(z)
+
+    @staticmethod
+    def _zone_dist(depth, mask):
+        """区域内障碍像素的最近距离(取低百分位, 抗离群点); 没有障碍像素则 inf。"""
+        if mask.size == 0:
+            return math.inf
+        vals = depth[mask][::4]                      # 下采样, 距离统计不需要全分辨率
+        vals = vals[np.isfinite(vals) & (vals > 0.0)]
+        if vals.size == 0:
+            return math.inf
+        return float(np.percentile(vals, DEPTH_PERCENTILE))
+
+    def _depth_rule(self, zones):
+        """深度规则: 用距离(而不是检测框个数)决定往哪边看。"""
+        left, center, right = zones
+        if min(left, center, right) >= ZONE_CLEAR:
+            return None                                   # 三区都远 -> 前方空旷
+        if left < STOP_DIST and right >= STOP_DIST:
+            return 'TURN_RIGHT'                           # 左侧贴脸 -> 只能往右
+        if right < STOP_DIST and left >= STOP_DIST:
+            return 'TURN_LEFT'
+        if left < STOP_DIST and right < STOP_DIST:
+            return None                                   # 两侧都贴脸 -> 保持, 乱转更糟
+        if center < ZONE_NEAR:                            # 正前方有近障碍 -> 让向更空的一侧
+            return 'TURN_LEFT' if left >= right else 'TURN_RIGHT'
+        if left < right - SIDE_MARGIN:
+            return 'TURN_RIGHT'                           # 左侧更近 -> 向右看
+        if right < left - SIDE_MARGIN:
+            return 'TURN_LEFT'
+        if center < ZONE_CLEAR:
+            return 'TURN_LEFT' if left >= right else 'TURN_RIGHT'
+        return None
+
+    def _fuse_rules(self):
+        """深度优先, YOLO 兜底: 深度说空旷而 YOLO 看到障碍时宁可信其有。"""
+        if not self._depth_ok() or self.depth_action is None:
+            return self._yolo_action
+        return self.depth_action
+
+    def _box_distance(self, det):
+        """用深度图给 YOLO 检测框测距(框内障碍像素中位数, 米); 测不到返回 inf。"""
+        d = self.latest_depth
+        if d is None or not self._depth_ok():
+            return math.inf
+        try:
+            x = int(det.bbox.center.position.x)
+            y = int(det.bbox.center.position.y)
+            bw = int(det.bbox.size.x)
+            bh = int(det.bbox.size.y)
+        except Exception:
+            return math.inf
+        h, w = d.shape[:2]
+        x0, x1 = max(x - bw // 2, 0), min(x + bw // 2, w)
+        y0, y1 = max(y - bh // 2, 0), min(y + bh // 2, h)
+        if x1 <= x0 or y1 <= y0:
+            return math.inf
+        roi = d[y0:y1, x0:x1]
+        vals = roi[np.isfinite(roi) & (roi > 0.0)]
+        if vals.size == 0:
+            return math.inf
+        return float(np.median(vals))
+
     def on_detections(self, msg):
         objects = []
+        dists = []
         for det in msg.detections:
             if getattr(det, 'score', 0.0) < 0.5:
                 continue
@@ -216,9 +364,12 @@ class ObstacleAvoider(Node):
                 cx = -1.0
             name = getattr(det, 'class_name', '') or str(getattr(det, 'class_id', '?'))
             objects.append((name, cx))
+            dists.append(self._box_distance(det))
 
         self._objects = objects
-        self.rule_action = self._rule_decision(objects)
+        self._object_dists = dists
+        self._yolo_action = self._rule_decision(objects)
+        self.rule_action = self._fuse_rules()
         ambiguous = self._is_ambiguous(objects)
 
         if not ambiguous:
@@ -363,18 +514,38 @@ class ObstacleAvoider(Node):
                 self.llm_action_time = time.time()
                 self._llm_busy = False
 
+    @staticmethod
+    def _fmt_dist(d):
+        """距离转文本: 测不到写 none, 其余保留两位小数(单位米)。"""
+        return 'none' if not math.isfinite(d) else f'{d:.2f}'
+
     def _prompt(self, objects):
         left = self._side_count(objects, 'left')
         right = self._side_count(objects, 'right')
         center = len(objects) - left - right
-        # 多物体: 明细位置喂给模型, 让它能看清分布而非只数个数
-        detail = ', '.join(f'{name}@{cx:.2f}' for name, cx in objects[:12]) or 'none'
+        # 多物体: 明细位置 + 深度测距一起喂给模型 —— 不光"有没有", 还要"多远"
+        parts = []
+        for i, (name, cx) in enumerate(objects[:12]):
+            d = self._object_dists[i] if i < len(self._object_dists) else math.inf
+            parts.append(f'{name}@x={cx:.2f},dist={self._fmt_dist(d)}m')
+        detail = '; '.join(parts) or 'none'
+        if self._depth_ok():
+            zl, zc, zr = self.depth_zones
+            depth_note = (
+                f'Depth camera zones (nearest obstacle per zone, meters, none=clear): '
+                f'left={self._fmt_dist(zl)}, center={self._fmt_dist(zc)}, right={self._fmt_dist(zr)}. '
+                f'An obstacle closer than 0.5m means that side is blocked. '
+            )
+        else:
+            depth_note = 'No depth data available. '
         return (
             'You control a robot camera. Decide which direction to turn to keep the safest view. '
             f'Obstacle counts: left={left}, right={right}, center={center}. '
             f'Detailed obstacles (name@x-position, 0=far left, 0.5=center, 1=far right): {detail}. '
+            f'{depth_note}'
             'Left < 0.4, right > 0.6, center in between. '
-            'Pick the side with fewer AND farther obstacles (avoid clusters). '
+            'Pick the side with fewer AND farther obstacles (avoid clusters); '
+            'never choose a side that is blocked closer than 0.5m. '
             'Reply with EXACTLY one token: TURN_LEFT or TURN_RIGHT.'
         )
 
