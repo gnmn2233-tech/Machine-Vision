@@ -1,0 +1,17 @@
+# 系统 Python 环境依赖（键盘控制 / 避障 / VLM / 位置感知节点）
+#
+# 安装:
+#   pip3 install -r requirements.txt
+#   Ubuntu 24.04 若报 externally-managed-environment, 加 --break-system-packages, 或改用 venv
+requests
+aiohttp
+pynput
+opencv-python
+
+# 下面这些由 ROS 2 提供 ( apt 安装, 不在 pip 里 ) :
+#   rclpy / tf2_ros / sensor_msgs / geometry_msgs / nav_msgs / visualization_msgs / std_msgs
+#   ros_gz_bridge / ros_gz_interfaces:
+#       sudo apt install ros-jazzy-ros-gz ros-jazzy-ros-gz-interfaces ros-jazzy-tf2-ros
+#   位置感知节点 robot_pose_monitor.py 只依赖 rclpy / tf2_ros / geometry_msgs / nav_msgs / sensor_msgs
+
+# YOLO 节点使用独立虚拟环境, 其依赖见 yolo_ros2_ws/src/yolo_ros/requirements.txt
