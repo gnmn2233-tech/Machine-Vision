@@ -1,3 +1,0 @@
-# 统一用 LF 检出, 避免 Windows 上 core.autocrlf=true 把整个仓库的 .sh/.py 变成 CRLF
-# (那会让每个文件都显示为已修改, 而且 .sh 在 bash 下直接报 \r 语法错误)
-* text=auto eol=lf

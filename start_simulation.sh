@@ -85,14 +85,6 @@ ros2 run ros_gz_bridge parameter_bridge \
   /drive_y/commands@std_msgs/msg/Float64]gz.msgs.Double \
   --ros-args -r __node:=bridge_drive_y &
 
-# ---- Gazebo 实体服务桥接 ----
-# A->B 导航点目标时, 在 Gazebo 世界里真的生成/删除一个目标球(绿色, 到达变蓝)
-# 服务桥接必须同时给出 Gazebo 的请求类型和响应类型, 少一个桥接会直接打印帮助退出
-ros2 run ros_gz_bridge parameter_bridge \
-  /world/default/create@ros_gz_interfaces/srv/SpawnEntity@gz.msgs.EntityFactory@gz.msgs.Boolean \
-  /world/default/remove@ros_gz_interfaces/srv/DeleteEntity@gz.msgs.Entity@gz.msgs.Boolean \
-  --ros-args -r __node:=bridge_entity &
-
 echo ""
 echo "========================================="
 echo "  ✅ 仿真启动完成！"
@@ -112,13 +104,6 @@ echo "  RViz2: Add -> Image -> /depth_camera/colorized   # 深度彩色图(越�
 echo "  bash view_camera.sh                               # 起 RViz2 并发布上面那路彩色深度图"
 echo "  ros2 run obstacle_avoider depth_probe             # 打印左/中/右三区最近距离"
 echo "  ros2 topic echo /nearest_obstacle                 # 最近障碍距离(米), 无碍为 inf"
-echo ""
-echo "新增功能 (另开终端):"
-echo "  位置感知   python3 $HOME/gz_ros/robot_pose_monitor.py   # /robot_pose /camera_pose /odom /robot_path + TF"
-echo "  A->B 导航  bash $HOME/gz_ros/run_navigator.sh           # RViz 里用 '2D Goal Pose' 点目标"
-echo "  深度可视化 bash $HOME/gz_ros/view_depth.sh              # 发布 /depth_view (伪彩色+检测框+左右中)"
-echo "  深度自检   python3 $HOME/gz_ros/check_depth.py"
-echo "  位置感知 RViz: bash $HOME/gz_ros/view_pose.sh"
 echo ""
 echo "手动转动关节测试:"
 echo "  gz topic -t /camera_joint_controller/commands -m gz.msgs.Double -p \"data: 1.0\""
