@@ -1,0 +1,8 @@
+# 系统 Python 环境依赖（键盘控制 / 避障 / VLM 节点）
+# 安装：pip3 install -r requirements.txt（Ubuntu 24.04 报 externally-managed 时加 --break-system-packages）
+requests
+aiohttp
+pynput
+opencv-python
+
+# 注意：YOLO 节点使用独立虚拟环境，其依赖见 yolo_ros2_ws/src/yolo_ros/requirements.txt
