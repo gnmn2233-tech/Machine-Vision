@@ -1,0 +1,4 @@
+# 统一按 LF 检出/提交。
+# Windows 上 Git 默认 core.autocrlf=true, 会把整个仓库变成 CRLF: 所有文件显示为"已修改",
+# 而且 .sh 在 bash 下直接报 \r 语法错误。详见 README「在 Windows 上克隆」一节。
+* text=auto eol=lf

@@ -337,13 +337,15 @@
       <static>false</static>
       <self_collide>false</self_collide>
     </model>
+    <!-- 用 model:// 而不是写死绝对路径: Gazebo 通过 GZ_SIM_RESOURCE_PATH 找模型,
+         这样任何人 clone 到任意目录都能加载 (start_simulation.sh 已把 mod/ 加进该变量) -->
     <include>
-      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
+      <uri>model://prius hybrid</uri>
       <name>prius_hybrid</name>
       <pose>4.7399296760558949 4.5714282989495638 0.01264973599772235 -3.3808915731029282e-08 2.3397734559909374e-12 8.9350098963611641e-08</pose>
     </include>
     <include>
-      <uri>file:///root/gz_ros/mod/walking person</uri>
+      <uri>model://walking person</uri>
       <name>person_walking</name>
       <pose>4.6140275001525879 -0.0059126601554453373 0.099999227882671946 0 0 0</pose>
     </include>
