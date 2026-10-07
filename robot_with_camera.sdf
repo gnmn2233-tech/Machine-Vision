@@ -313,6 +313,9 @@
       </plugin>
       <plugin name='gz::sim::systems::JointStatePublisher' filename='gz-sim-joint-state-publisher-system'>
         <topic>joint_state</topic>
+        <!-- 位置感知需要 drive_x/drive_y 才能解出 x/y (只发 base_yaw 时只能知道朝向) -->
+        <joint_name>drive_x_joint</joint_name>
+        <joint_name>drive_y_joint</joint_name>
         <joint_name>base_yaw_joint</joint_name>
       </plugin>
       <plugin name='gz::sim::systems::JointPositionController' filename='gz-sim-joint-position-controller-system'>
