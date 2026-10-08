@@ -11,7 +11,7 @@
         --base_yaw_joint(revolute +z)--> base --camera_joint(fixed z=0.175)--> cylinder(相机)
   相机传感器在 cylinder 上的位姿: x=+0.1, z=+0.28
   => 机器人 base 世界位姿 = (x, y, 0.075, yaw)
-  => 相机   世界位姿 = base + R(yaw)*(0.1, 0, 0.455)   (高度恒为 0.53 m)
+  => 相机   世界位姿 = base + R(yaw)*(0.1, 0, 0.205)   (世界高度恒为 0.28 m)
   说明: 朝向在 base_yaw_joint 上, 模型根连杆 chassis_x 只平移不旋转,
         所以不用 gz 的 OdometryPublisher (它发布模型根位姿, yaw 恒为 0)。
 
@@ -20,6 +20,7 @@
   /camera_pose  geometry_msgs/PoseStamped  frame=odom       相机光心位姿
   /odom         nav_msgs/Odometry                           标准里程计接口 (yaw 已修正)
   /robot_path   nav_msgs/Path                               轨迹 (RViz 画线)
+  /robot_label  visualization_msgs/MarkerArray              frame=odom  机器人上方的坐标文字
   TF: odom -> base_link -> camera_link -> camera_optical_frame
 """
 import math
@@ -31,6 +32,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
+from visualization_msgs.msg import Marker, MarkerArray
 
 # ---- 几何常量 (单位 m)。用 Gazebo 的 /pose_info 实测校准, 不是照抄 SDF 数字 ----
 # 实测运动学链: robot_with_camera -> base      (0, 0, 0.075)
@@ -55,6 +57,9 @@ JOINT_YAW = 'base_yaw_joint'
 
 PATH_MIN_STEP = 0.01                             # 轨迹点最小间距 (m)
 PATH_MAX_POSES = 5000
+
+LABEL_Z_OFFSET = 0.35                            # /robot_label 文字高度 = base 高度 + 该偏移
+LABEL_SCALE = 0.12                               # 文字大小 (m)
 
 
 def yaw_to_quat(yaw):
@@ -109,6 +114,7 @@ class RobotPoseMonitor(Node):
         self.camera_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.path_pub = self.create_publisher(Path, '/robot_path', 10)
+        self.label_pub = self.create_publisher(MarkerArray, '/robot_label', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self.path = Path()
@@ -118,7 +124,8 @@ class RobotPoseMonitor(Node):
         self.create_timer(0.05, self.on_timer)       # 20 Hz
 
         self.get_logger().info(
-            '位置感知节点已启动: /joint_states -> /robot_pose /camera_pose /odom /robot_path + TF')
+            '位置感知节点已启动: /joint_states -> /robot_pose /camera_pose /odom /robot_path'
+            ' /robot_label + TF')
 
     # ---------------- 关节状态 (真值) ----------------
     def on_joint_state(self, msg):
@@ -224,6 +231,27 @@ class RobotPoseMonitor(Node):
             self.path.poses.append(ps)
             if len(self.path.poses) > PATH_MAX_POSES:
                 self.path.poses = self.path.poses[-PATH_MAX_POSES:]
+
+        # ---- /robot_label: 机器人头顶的坐标文字 (RViz 里贴在那个箭头旁边) ----
+        label = Marker()
+        label.header.stamp = now
+        label.header.frame_id = ODOM_FRAME
+        label.ns = 'robot_label'
+        label.id = 0
+        label.type = Marker.TEXT_VIEW_FACING
+        label.action = Marker.ADD
+        label.pose.position.x = self.x
+        label.pose.position.y = self.y
+        label.pose.position.z = BASE_Z + LABEL_Z_OFFSET
+        label.pose.orientation.w = 1.0
+        label.scale.z = LABEL_SCALE
+        label.color.r = label.color.g = label.color.b = 1.0
+        label.color.a = 1.0
+        label.lifetime.sec = 1                   # 1 秒; 20 Hz 重发, 节点停了文字自动消失
+        label.lifetime.nanosec = 0
+        label.text = (f'x={self.x:+.2f} m   y={self.y:+.2f} m\n'
+                      f'yaw={math.degrees(yaw):+.1f} deg')
+        self.label_pub.publish(MarkerArray(markers=[label]))
 
         # ---- 1 Hz: 重复发布轨迹(后启动的 RViz 也能收到) + 日志 ----
         t = self.get_clock().now().nanoseconds / 1e9

@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# all.sh - 
+# all.sh - 一键启动
 #   1) start_simulation.sh   仿真 + 键盘 + 全部话题桥(含深度相机)
 #   2) yolo.sh               YOLO 检测
 #   3) view_camera.sh        RViz2 + 静默发布 /depth_camera/colorized + 静态 TF
-# Ctrl+C 
+# Ctrl+C 一次性收干净
 
 cd "$(dirname "$0")" || exit 1
 
@@ -21,7 +21,8 @@ export GZ_SIM_RESOURCE_PATH="$HOME/gz_ros/mod:$GZ_SIM_RESOURCE_PATH"
 echo "正在清理旧进程..."
 for pat in '[g]z sim' '[p]arameter_bridge' '[r]viz2' '[d]epth_probe' \
            '[s]tatic_transform_publisher' '[k]eyboard_joint_controller' \
-           '[o]bstacle_avoider' '[y]olo_ros2' '[v]lm_camera_rotator'; do
+           '[o]bstacle_avoider' '[y]olo_ros2' '[v]lm_camera_rotator' \
+           '[r]obot_pose_monitor'; do
     pkill -9 -f "$pat" 2>/dev/null
 done
 
@@ -63,29 +64,45 @@ fi
 echo "✓ 环境就绪, 残留已清理"
 echo ""
 
-# ---- 依次启动三路 ----
-echo "[1/3] 仿真 + 键盘 + 话题桥..."
+# ---- 依次启动四路 ----
+echo "[1/4] 仿真 + 键盘 + 话题桥..."
 bash start_simulation.sh &
 SIM_PID=$!
 sleep 3
 
-echo "[2/3] YOLO 检测..."
+echo "[2/4] YOLO 检测..."
 bash yolo.sh &
 YOLO_PID=$!
 sleep 3
 
-echo "[3/3] RViz2 相机可视化..."
+echo "[3/4] RViz2 (相机图 + 轨迹)..."
 bash view_camera.sh &
 VIEW_PID=$!
+sleep 2
+
+echo "[4/4] 位置感知 (机器人/相机位姿 + TF)..."
+python3 robot_pose_monitor.py > /tmp/pose_monitor.log 2>&1 &
+POSE_PID=$!
+sleep 3
+if kill -0 $POSE_PID 2>/dev/null; then
+    echo "✓ 位置感知已启动: /robot_pose /camera_pose /odom /robot_path + TF"
+    echo "  轨迹就在上面那个 RViz2 窗口里: Path(/robot_path) 已开, Fixed Frame=odom"
+    echo "  机器人头顶会跟着显示坐标文字: x / y / yaw  (/robot_label)"
+    echo "  (想另开一个只看位姿的窗口: bash view_pose.sh, 可选)"
+else
+    echo "⚠️  位置感知启动失败, 最后 5 行日志:"
+    tail -5 /tmp/pose_monitor.log
+fi
 
 cleanup() {
     echo ""
     echo "收尾: 停止所有子进程..."
-    kill $SIM_PID $YOLO_PID $VIEW_PID 2>/dev/null
+    kill $SIM_PID $YOLO_PID $VIEW_PID $POSE_PID 2>/dev/null
     for _ in 1 2; do
         for pat in '[d]epth_probe' '[s]tatic_transform_publisher' '[r]viz2' \
                    '[p]arameter_bridge' '[g]z sim' '[k]eyboard_joint_controller' \
-                   '[o]bstacle_avoider' '[y]olo' '[v]lm_camera_rotator'; do
+                   '[o]bstacle_avoider' '[y]olo' '[v]lm_camera_rotator' \
+                   '[r]obot_pose_monitor'; do
             pkill -9 -f "$pat" 2>/dev/null
         done
         sleep 1

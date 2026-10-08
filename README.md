@@ -37,7 +37,7 @@ Machine-Vision/
 ├── keyboard_joint_controller.py   # 键盘控制（空闲静默，与避障协作）
 ├── yolo.sh                        # 启动 YOLO 检测
 ├── run_obstacle_avoider.sh        # 启动避障节点（含 LLM failover 配置 + 桥保活）
-├── view_camera.sh                 # RViz2 + 深度彩色图发布 + 静态 TF
+├── view_camera.sh                 # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
 ├── mod/                           # 仿真用第三方模型（车辆 / 行人 / 地面等）
 ├── obstacle_ws/                   # colcon 工作区：避障节点 + depth_probe
 ├── vlm_navigator/                 # colcon 包：VLM 相机旋转
@@ -46,7 +46,7 @@ Machine-Vision/
 │   ── 机器人/相机位置感知（本次新增） ──
 ├── robot_pose_monitor.py          # 位置感知节点：位姿解算 + TF
 ├── view_pose.sh                   # RViz2 查看位姿与轨迹
-├── robot_pose.rviz                #   上面的 RViz 配置
+├── robot_pose.rviz                #   两个可视化脚本共用的 RViz 配置
 └── requirements.txt               # 系统 Python 侧依赖
 ```
 
@@ -101,8 +101,12 @@ bash view_camera.sh             # 终端4：RViz + 深度彩色图（可选）
 
 ```bash
 python3 robot_pose_monitor.py   # 需要 start_simulation.sh 已在运行
-bash view_pose.sh               # 另开终端：RViz 看位姿与轨迹
+bash view_pose.sh               # 另开终端：单独的位姿窗口（可选）
 ```
+
+> `all.sh` 已经把它接成第 4 路，并且第 3 路那个 RViz2 窗口本身就用本文的 `robot_pose.rviz`
+> 启动（Fixed Frame = `odom`）——所以**轨迹不用另开窗口**，跑 `all.sh` 就在那个 RViz2 里看到
+> `Path(/robot_path)` 的线和 `Odometry(/odom)` 的箭头；要看相机图仍照旧 Add → Image。
 
 ## 位置感知（机器人 / 相机位姿）
 
@@ -126,6 +130,7 @@ base 世界位姿 = (x, y, 0.075, yaw)             base 连杆比模型原点高
 | `/camera_pose` | `geometry_msgs/PoseStamped` | 相机光心位姿（frame: odom） |
 | `/odom` | `nav_msgs/Odometry` | 里程计（yaw 已修正，frame: odom → base_link） |
 | `/robot_path` | `nav_msgs/Path` | 运动轨迹（RViz 显示） |
+| `/robot_label` | `visualization_msgs/MarkerArray` | 机器人头顶的坐标文字（RViz MarkerArray 显示 `x/y/yaw`，frame: odom） |
 | TF | — | `odom → base_link → camera_link → camera_optical_frame` |
 
 ### 在终端查看当前位置（使用者最常用）

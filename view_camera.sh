@@ -1,16 +1,19 @@
 #!/bin/bash
 
-# 相机可视化: 起 RViz2, 里面同时看彩色相机和深度相机
+# 相机可视化: 起 RViz2, 里面同时看彩色相机、深度相机和机器人轨迹
 #   彩色图       /camera
 #   深度彩色图   /depth_camera/colorized  (在 RViz2 里 Add -> Image, Topic 填它)
+#   轨迹         /robot_path              (配置里已开, Fixed Frame=odom)
 # 深度彩色图由本脚本后台的 depth_probe --publish 安静发布, 不弹窗、不打日志。
-# 静态 TF: RViz2 的 Image display 需要 TF, 把两个相机 frame 挂到 map 下(只求可查, 不用于对齐)。
+# 静态 TF: 把两个相机 frame 挂到 map 下(只求可查, 不用于对齐)。
+# 用 robot_pose.rviz 启动: Fixed Frame=odom, 自带 /robot_path 轨迹线 + /odom 箭头 + TF。
+# 轨迹来自 robot_pose_monitor.py (all.sh 第 4 路自动起; 单独跑本脚本时没有它就没有轨迹)。
 
 source /opt/ros/jazzy/setup.bash
 source ~/gz_ros/obstacle_ws/install/setup.bash 2>/dev/null
 
 echo "========================================="
-echo "  相机图像查看 - 使用 RViz2"
+echo "  相机图像 + 轨迹查看 - 使用 RViz2"
 echo "========================================="
 
 # 检查 rviz2 包是否已安装
@@ -79,7 +82,8 @@ echo "RViz2 里看图:  Add -> Image -> Topic"
 echo "  彩色相机     /camera"
 echo "  深度(彩色)   /depth_camera/colorized   (越红越近, 黑=没回波)"
 echo "  ※ Add 对话框是打开那一刻的快照, 后起的话题要关掉重新 Add 才看得到"
+echo "看轨迹: Path(/robot_path) 已开, Fixed Frame=odom —— 动一下机器人就画线"
 echo ""
 
-# 启动 RViz2
-ros2 run rviz2 rviz2
+# 启动 RViz2 (robot_pose.rviz: Fixed Frame=odom + /robot_path + /odom + TF)
+ros2 run rviz2 rviz2 -d "$HOME/gz_ros/robot_pose.rviz"
