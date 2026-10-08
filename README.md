@@ -128,12 +128,83 @@ base 世界位姿 = (x, y, 0.075, yaw)             base 连杆比模型原点高
 | `/robot_path` | `nav_msgs/Path` | 运动轨迹（RViz 显示） |
 | TF | — | `odom → base_link → camera_link → camera_optical_frame` |
 
-验证：
+### 在终端查看当前位置（使用者最常用）
+
+**前提**：两个终端在跑 —— `bash start_simulation.sh`（提供 `/joint_states`）
+和 `python3 robot_pose_monitor.py`（位置感知节点）。
+
+**① 最省事：位置感知节点自己每 1 秒打印一行**
+
+```
+[INFO] [robot_pose_monitor]: x=+1.50 y=-0.80 yaw=+34.3 deg | 相机(+1.58, -0.74, 0.28)
+```
+
+**② 另开一个终端订阅一次**（Windows 用户先执行 `wsl` 进入 Ubuntu-24.04）
 
 ```bash
-ros2 topic echo /robot_pose --once      # 机器人位姿
-ros2 topic echo /joint_states --once    # 应含 drive_x/drive_y/base_yaw 三个关节
-ros2 run tf2_tools view_frames          # 生成 TF 树 PDF
+source /opt/ros/jazzy/setup.bash      # ~/.bashrc 已自动 source 过则可省略
+ros2 topic echo /robot_pose --once
+```
+
+真实输出：
+
+```yaml
+header:
+  stamp:
+    sec: 1791451462
+    nanosec: 646682793
+  frame_id: odom
+pose:
+  position:
+    x: 1.4999999999995859
+    y: -0.7999999999950517
+    z: 0.075
+  orientation:
+    x: 0.0
+    y: 0.0
+    z: 0.29187398255587677
+    w: 0.9564567832928844
+---
+```
+
+**③ 只要坐标数字**
+
+```bash
+ros2 topic echo /robot_pose --once --field pose.position
+# x: 1.4999999999999962
+# y: -0.7999999999999968
+# z: 0.075
+```
+
+**④ 连续刷新**（去掉 `--once`，Ctrl+C 退出）
+
+```bash
+ros2 topic echo /robot_pose
+```
+
+**⑤ 相机光心的位置**（比机器人中心高，且随云台转动绕着机器人画小圆）
+
+```bash
+ros2 topic echo /camera_pose --once
+# position: x=1.5827  y=-0.7438  z=0.28
+```
+
+**怎么把四元数读成朝向角**：`yaw = atan2(2(w·z + x·y), 1 − 2(y² + z²))`。
+上面那组 `z=0.2919, w=0.9565` 就是 **34.3°**。不想算就直接看 ① 里节点打印的 `yaw=+34.3 deg`，
+或读 `/odom`（同样的四元数，`child_frame_id` 标了 `base_link`）。
+
+**排错**
+
+| 现象 | 原因 / 处理 |
+|------|------|
+| `--once` 一直卡住不输出 | 没人在发布 → 确认 `start_simulation.sh` 和 `robot_pose_monitor.py` 都在跑 |
+| `ros2: command not found` | 忘了 `source /opt/ros/jazzy/setup.bash`，或不在 WSL 里 |
+| 数值一直是 0 | `/joint_states` 没数据 → `ros2 topic echo /joint_states --once`，应含 `drive_x_joint` / `drive_y_joint` / `base_yaw_joint` |
+
+```bash
+ros2 topic hz /robot_pose       # 发布频率（约 20 Hz）
+ros2 node list                  # 应能看到 /robot_pose_monitor
+ros2 run tf2_tools view_frames  # 生成 TF 树 PDF
 ```
 
 ## 话题速查
