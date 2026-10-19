@@ -133,7 +133,7 @@ class DepthProbe(Node):
             depth = np.asarray(self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1'),
                                dtype=np.float32)
         except Exception as e:
-            self.get_logger().warn(f'深度图解码失败: {e}')
+            self.get_logger().warn(f'Не удалось раскодировать глубину: {e}')
             return
         if depth.ndim != 2 or depth.size == 0:
             return

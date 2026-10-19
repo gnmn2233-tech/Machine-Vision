@@ -124,7 +124,7 @@ class RobotPoseMonitor(Node):
         self.create_timer(0.05, self.on_timer)       # 20 Hz
 
         self.get_logger().info(
-            '位置感知节点已启动: /joint_states -> /robot_pose /camera_pose /odom /robot_path'
+            'Позиционирование: /joint_states -> /robot_pose /camera_pose /odom /robot_path'
             ' /robot_label + TF')
 
     # ---------------- 关节状态 (真值) ----------------
@@ -138,7 +138,7 @@ class RobotPoseMonitor(Node):
             self.yaw.update(float(pos[JOINT_YAW]))
         if not self.got_joints:
             self.got_joints = True
-            self.get_logger().info(f'已收到关节状态, 可用关节: {sorted(pos.keys())}')
+            self.get_logger().info(f'Получен /joint_states, шарниры: {sorted(pos.keys())}')
 
     # ---------------- 周期发布 ----------------
     def on_timer(self):
@@ -261,7 +261,7 @@ class RobotPoseMonitor(Node):
                 self.path_pub.publish(self.path)
             self.get_logger().info(
                 f'x={self.x:+.2f} y={self.y:+.2f} yaw={math.degrees(yaw):+.1f} deg'
-                f' | 相机({cam_x:+.2f}, {cam_y:+.2f}, {CAM_Z_WORLD:.2f})')
+                f' | камера({cam_x:+.2f}, {cam_y:+.2f}, {CAM_Z_WORLD:.2f})')
 
 
 def main(args=None):

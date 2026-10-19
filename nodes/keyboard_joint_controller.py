@@ -96,7 +96,7 @@ class KeyboardJointController(Node):
         # 定时器 50Hz 在主线程中发布平滑后的角度
         self.timer = self.create_timer(0.02, self.timer_callback)
 
-        self.get_logger().info("键盘关节控制器已启动（按住转动 · 松开即停 · 点按一下转一下 · 按键时自动接管避障）")
+        self.get_logger().info("Контроллер шарниров запущен (стрелки: удержание/клик, Esc: выход)")
         self.print_help()
 
     def on_joint_states(self, msg):
@@ -124,21 +124,21 @@ class KeyboardJointController(Node):
                 self.smooth.set_target(self.smooth.pos)
                 self.drive_x.set_target(self.drive_x.pos)
                 self.drive_y.set_target(self.drive_y.pos)
-                self.get_logger().info('导航接管中, 键盘静默')
+                self.get_logger().info('Навигация: клавиатура молчит')
             else:
                 # 交还瞬间以实测关节角重新锚定: 键盘从机器人当前实际位置接着走, 不带旧坐标
                 ok_yaw = self._anchor_yaw()
                 ok_drive = self._anchor_drive()
                 self.get_logger().info(
-                    '导航已结束, 键盘恢复'
-                    + ('' if (ok_yaw and ok_drive) else ' (未收到 /joint_states, 沿用键盘内部状态)'))
+                    'Навигация закончена, клавиатура снова работает'
+                    + ('' if (ok_yaw and ok_drive) else ' (нет /joint_states, беру своё состояние)'))
 
     def _warn_once_real(self):
         if not self._real_warned:
             self._real_warned = True
             self.get_logger().warn(
-                '未收到 /joint_states 真实关节角 (检查 joint_state 桥是否带 '
-                "-r /joint_state:=/joint_states), 沿用键盘自身状态接管")
+                'Нет /joint_states (проверьте мост: -r /joint_state:=/joint_states), '
+                "беру состояние клавиатуры")
 
     def _anchor_yaw(self):
         """以实测角为接管基准: 键盘自己的 pos 还停在它上次停下的角度,
@@ -165,12 +165,12 @@ class KeyboardJointController(Node):
         return True
 
     def print_help(self):
-        print("\n控制说明：")
-        print("  左箭头 (←) : 按住持续向左转，松开停止；点按一下转一下")
-        print("  右箭头 (→) : 按住持续向右转，松开停止；点按一下转一下")
-        print("  上箭头 (↑) : 按住前进，松开停止")
-        print("  下箭头 (↓) : 按住后退，松开停止（速度 0.25 m/s）")
-        print("  ESC       : 退出")
+        print("\nУправление:")
+        print("  ← : держать - влево, отпустить - стоп; клик - шаг")
+        print("  → : держать - вправо, отпустить - стоп; клик - шаг")
+        print("  ↑ : держать - вперёд, отпустить - стоп")
+        print("  ↓ : держать - назад, отпустить - стоп (0.25 м/с)")
+        print("  ESC : выход")
 
     def timer_callback(self):
         """定时器回调 (50Hz):
@@ -185,7 +185,7 @@ class KeyboardJointController(Node):
             if (self._pressed or self._move) and \
                time.time() - self._last_key_event > self._stuck_timeout:
                 self.get_logger().warn(
-                    f"检测到卡键 ({self._stuck_timeout:.0f}s 无键盘事件), 自动复位, 交还控制权")
+                    f"Клавиша залипла ({self._stuck_timeout:.0f}с без событий), сброс, управление возвращено")
                 self._pressed = None
                 self._move = None
                 self.smooth.set_target(self.smooth.pos)
@@ -279,12 +279,12 @@ class KeyboardJointController(Node):
                         self._anchor_drive()
                     self._move = 'down'
             elif key == keyboard.Key.esc:
-                self.get_logger().info("ESC 退出，关闭键盘控制器")
+                self.get_logger().info("ESC: выход, останавливаю контроллер")
                 # 退出前关闭节点，触发 shutdown
                 rclpy.shutdown()  # 会停止整个 rclpy 上下文
                 return False      # 停止监听
         except Exception as e:
-            self.get_logger().error(f"按键处理异常: {e}")
+            self.get_logger().error(f"Ошибка нажатия: {e}")
         return True
 
     def on_release(self, key):
@@ -312,7 +312,7 @@ class KeyboardJointController(Node):
                 with self._lock:
                     self._move = None
         except Exception as e:
-            self.get_logger().error(f"松键处理异常: {e}")
+            self.get_logger().error(f"Ошибка отпускания: {e}")
         return True
 
 def main(args=None):

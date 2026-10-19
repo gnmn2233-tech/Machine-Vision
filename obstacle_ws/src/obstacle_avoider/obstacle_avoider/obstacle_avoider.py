@@ -168,7 +168,7 @@ class ObstacleAvoider(Node):
         self.timer = self.create_timer(0.04, self.tick)
 
         self.provider = self._detect_provider()
-        self.get_logger().info(f'避障节点启动: 模型后端={self.provider}, 模型={self._model_name()}')
+        self.get_logger().info(f'Объезд запущен: бэкенд={self.provider}, модель={self._model_name()}')
 
     # ---------------- 配置 ----------------
     def _model_name(self):
@@ -214,21 +214,21 @@ class ObstacleAvoider(Node):
         self._joint_synced = True
         self._resync_pending = False
         if was_resync:
-            self.get_logger().info(f'接管释放: 已重新同步关节角 {angle:.3f} rad, 避障恢复')
+            self.get_logger().info(f'Возврат управления: шарнир синхронизирован {angle:.3f} рад, объезд работает')
         else:
-            self.get_logger().info(f'已同步真实关节角 base_yaw_joint={angle:.3f} rad, 零漂移起步')
+            self.get_logger().info(f'Синхронизирован base_yaw_joint={angle:.3f} рад, старт без скачка')
 
     def on_override(self, msg):
         """键盘接管信号: >0.5 键盘说话(避障停发); <=0.5 键盘交还(避障恢复)。"""
         ov = msg.data > 0.5
         if ov and not self._overridden:
             self._overridden = True
-            self.get_logger().info('键盘接管: 避障暂停发布')
+            self.get_logger().info('Управление у клавиатуры: объезд молчит')
         elif not ov and self._overridden:
             self._overridden = False
             self._resync_pending = True
             self._resync_t0 = time.time()
-            self.get_logger().info('键盘释放: 等待关节角重同步')
+            self.get_logger().info('Клавиатура отпустила: жду ресинхронизации шарнира')
 
     def on_image(self, msg):
         try:
@@ -502,12 +502,12 @@ class ObstacleAvoider(Node):
             else:
                 action = self._ask_ollama(objects, image)
             if action:
-                self.get_logger().info(f'模型决策: {action}')
+                self.get_logger().info(f'Решение модели: {action}')
         except Exception as e:
             now = time.time()
             if now - self._last_fail_log > 10:
                 self._last_fail_log = now
-                self.get_logger().warn(f'模型调用失败, 本次使用规则: {e}')
+                self.get_logger().warn(f'Сбой модели, работаю по правилам: {e}')
         finally:
             with self._llm_lock:
                 self.llm_action = action
@@ -613,7 +613,7 @@ class ObstacleAvoider(Node):
             now = time.time()
             if now - self._last_fail_log > 10:
                 self._last_fail_log = now
-                self.get_logger().warn(f'本地 LLM 不可用, 尝试云端兜底: {e}')
+                self.get_logger().warn(f'Локальная LLM недоступна, пробую облако: {e}')
         key = os.environ.get('LLM_CLOUD_KEY', '')
         if not key:
             raise RuntimeError('未配置云端 key (LLM_CLOUD_KEY), 跳过云端')
@@ -651,7 +651,7 @@ class ObstacleAvoider(Node):
 
     # ---------------- 关闭 ----------------
     def destroy_node(self):
-        self.get_logger().info('避障节点退出')
+        self.get_logger().info('Объезд завершён')
         super().destroy_node()
 
 

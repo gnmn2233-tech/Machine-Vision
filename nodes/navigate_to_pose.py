@@ -193,10 +193,10 @@ class Navigator(Node):
         self.create_timer(self.dt, self.on_timer)
 
         self.get_logger().info(
-            f'导航节点已启动: v_max={self.v_max} m/s, 到点阈值={self.arrive_eps} m, '
-            f'控制频率={self.hz:.0f} Hz')
+            f'Навигация запущена: v_max={self.v_max} м/с, допуск={self.arrive_eps} м, '
+            f'частота={self.hz:.0f} Гц')
         self.get_logger().info(
-            '输入坐标: 命令行传 "x y" / 终端直接输入 "x y [角度]" / 发 /goal_pose 或 /navigate_to')
+            'Куда ехать: аргументы "x y" / ввод в терминале "x y [угол]" / /goal_pose или /navigate_to')
 
     # ================= 输入 =================
     def on_joint_state(self, msg):
@@ -213,7 +213,7 @@ class Navigator(Node):
             self._last_cmd_y = self.y
             self._last_cmd_yaw = self.yaw.value
             self.get_logger().info(
-                f'已收到定位 (/joint_states): x={self.x:+.2f} y={self.y:+.2f} '
+                f'Позиция получена (/joint_states): x={self.x:+.2f} y={self.y:+.2f} '
                 f'yaw={math.degrees(self.yaw.value):+.1f} deg')
         self._last_joint_t = time.time()
 
@@ -234,7 +234,7 @@ class Navigator(Node):
                 self.queue.clear()
             self.queue.append((pt[0], pt[1], yaw))
         if append and self.state == self.MOVING:
-            self.get_logger().info(f'追加航点 ({x:+.2f}, {y:+.2f}), 队列 {len(self.queue)} 个')
+            self.get_logger().info(f'Добавил точку ({x:+.2f}, {y:+.2f}), в очереди {len(self.queue)}')
             return
         self._start_next()
 
@@ -264,7 +264,7 @@ class Navigator(Node):
 
     def on_goal_pose2d(self, msg):
         yaw = float(msg.theta) if abs(msg.theta) > 1e-9 else None
-        self.get_logger().info(f'收到 /navigate_to: ({msg.x:+.2f}, {msg.y:+.2f})'
+        self.get_logger().info(f'Получен /navigate_to: ({msg.x:+.2f}, {msg.y:+.2f})'
                                + (f' yaw={math.degrees(yaw):+.1f} deg' if yaw else ''))
         self.add_goal(msg.x, msg.y, yaw)
 
@@ -273,13 +273,13 @@ class Navigator(Node):
         with self._lock:
             if not self.queue:
                 if self.state == self.MOVING:
-                    self.get_logger().info('目标队列已空')
+                    self.get_logger().info('Очередь целей пуста')
                 self.goal = None
                 self.state = self.IDLE
                 return
             self.goal = self.queue.pop(0)
         if not self.got_joints:
-            self.get_logger().warn('还没收到 /joint_states (定位), 先等待定位再出发...')
+            self.get_logger().warn('Нет /joint_states (позиции), жду данные...')
         self.cmd_x = self.cmd_y = None      # 新目标: 指令基准重新对齐实测
         self.want_heading = None
         self.state = self.MOVING
@@ -287,22 +287,22 @@ class Navigator(Node):
         self.steal_since = None
         gx, gy, gyaw = self.goal
         self.get_logger().info(
-            f'出发 -> ({gx:+.2f}, {gy:+.2f})'
+            f'Старт -> ({gx:+.2f}, {gy:+.2f})'
             + (f' yaw={math.degrees(gyaw):+.1f} deg' if gyaw is not None else '')
-            + f', 剩余航点 {len(self.queue)} 个')
+            + f', осталось целей: {len(self.queue)}')
 
-    def cancel(self, why='用户取消'):
+    def cancel(self, why='отмена пользователем'):
         with self._lock:
             self.queue.clear()
             self.goal = None
         if self.state == self.MOVING:
-            self.get_logger().warn(f'导航取消: {why} (停止在当前 x={self.x:+.2f} y={self.y:+.2f})')
+            self.get_logger().warn(f'Отмена: {why} (стоим на x={self.x:+.2f} y={self.y:+.2f})')
         self.state = self.IDLE
         if self._override_on:
             self._override_on = False
             self.pub_override.publish(Float64(data=0.0))
         self.pub_reached.publish(Bool(data=False))
-        self._publish_status('已取消')
+        self._publish_status('отменено')
 
     # ================= 主循环 =================
     def on_timer(self):
@@ -313,14 +313,14 @@ class Navigator(Node):
         if silent > STALE_ABORT:
             if self.state == self.MOVING:
                 self.get_logger().error(
-                    f'定位断流 {silent:.1f}s (/joint_states 无数据), 放弃当前目标')
-                self.cancel('定位断流')
+                    f'Нет данных {silent:.1f}с (/joint_states молчит), бросаю цель')
+                self.cancel('нет данных о позиции')
             return
         if silent > STALE_PAUSE:
             if self.state == self.MOVING:
                 if not self._stale_warned:
                     self._stale_warned = True
-                    self.get_logger().warn(f'定位中断 {silent:.1f}s, 暂停推进等待恢复...')
+                    self.get_logger().warn(f'Позиция пропала {silent:.1f}с, пауза...')
                 # 指令回收到最后已知位姿, 让位置伺服就地刹住, 不照着旧指令继续冲
                 if self._override_on:
                     self.pub_x.publish(Float64(data=self.x))
@@ -330,7 +330,7 @@ class Navigator(Node):
             return
         if self._stale_warned:
             self._stale_warned = False
-            self.get_logger().info('定位已恢复, 继续前进')
+            self.get_logger().info('Позиция восстановлена, продолжаю')
 
         if self.state != self.MOVING or self.goal is None:
             # 空闲时不发 /avoider_override, 免得盖掉键盘控制器发出的接管信号
@@ -341,8 +341,8 @@ class Navigator(Node):
 
         # ---- 超时保护 ----
         if time.time() - self.goal_start > self.goal_timeout:
-            self.get_logger().error(f'导航超时 ({self.goal_timeout:.0f}s 未到点), 停车')
-            self.cancel('超时')
+            self.get_logger().error(f'Таймаут ({self.goal_timeout:.0f}с), стоп')
+            self.cancel('таймаут')
             return
 
         gx, gy, gyaw = self.goal
@@ -358,9 +358,9 @@ class Navigator(Node):
             if now - ref_t >= STEAL_WINDOW:
                 if dist > ref_dist + STEAL_GROW:
                     self.get_logger().warn(
-                        f'检测到控制权被抢占 (离目标从 {ref_dist:.2f} m 变成 {dist:.2f} m, '
-                        f'反向走了 {dist - ref_dist:.2f} m), 导航中止')
-                    self.cancel('控制权被抢占 (键盘/避障接管)')
+                        f'Перехват управления (до цели было {ref_dist:.2f} м, стало {dist:.2f} м, '
+                        f'ушли назад на {dist - ref_dist:.2f} м), навигация прервана')
+                    self.cancel('перехват управления (клавиатура/объезд)')
                     return
                 self.steal_since = (now, dist)
 
@@ -385,12 +385,12 @@ class Navigator(Node):
 
         if not arrived_xy and abs(err) > self.heading_gate:
             # 车头偏得太多: 先原地转向对准, 期间不前进
-            phase = f'转向中 (偏差 {math.degrees(err):+.0f} deg)'
+            phase = f'поворот (отклонение {math.degrees(err):+.0f} deg)'
             w = min(self.w_max, max(math.sqrt(4.0 * abs(err)), 0.05))
             self.cmd_yaw += math.copysign(min(w * self.dt, abs(err)), err)
         elif not arrived_xy:
             # 已对准: 沿车头直行, 边走边小角度修正 (车头始终朝运动方向)
-            phase = '前进中'
+            phase = 'едем'
             v = min(self.v_max, max(math.sqrt(2.0 * self.a_max * dist_cmd), 0.03))
             if dist_cmd < 0.5:
                 v = min(v, 0.18)                    # 近场慢速靠拢, 避免冲过头
@@ -400,7 +400,7 @@ class Navigator(Node):
             w = max(-self.w_max, min(self.w_max, self.turn_gain * err))
             self.cmd_yaw += w * self.dt
         else:
-            phase = '到点'
+            phase = 'на месте'
 
         # 到点后若指定了朝向, 原地转到该朝向
         if arrived_xy and gyaw is not None:
@@ -410,7 +410,7 @@ class Navigator(Node):
             if not arrived_yaw:
                 w = min(self.w_max, max(math.sqrt(4.0 * abs(yerr)), 0.05))
                 self.cmd_yaw += math.copysign(min(w * self.dt, abs(yerr)), yerr)
-                phase = f'到位转向中 (偏差 {math.degrees(yerr):+.0f} deg)'
+                phase = f'доворот (отклонение {math.degrees(yerr):+.0f} deg)'
             else:
                 self.cmd_yaw = tgt
 
@@ -444,11 +444,11 @@ class Navigator(Node):
             self.state = self.ARRIVED
             self.pub_reached.publish(Bool(data=True))
             self.get_logger().info(
-                f'✓ 已到达 ({gx:+.2f}, {gy:+.2f})'
-                f' | 实际 x={self.x:+.2f} y={self.y:+.2f} '
+                f'✓ Прибыл ({gx:+.2f}, {gy:+.2f})'
+                f' | факт x={self.x:+.2f} y={self.y:+.2f} '
                 f'yaw={math.degrees(self.yaw.value):+.1f} deg'
-                f' | 误差 {dist * 1000:.0f} mm')
-            self._publish_status('已到达')
+                f' | ошибка {dist * 1000:.0f} мм')
+            self._publish_status('прибыл')
             self.goal = None
             self._start_next()                       # 队列里还有就继续走
             return
@@ -459,9 +459,9 @@ class Navigator(Node):
             self._status_log_t = t
             speed = min(self.v_max, max(math.sqrt(2.0 * self.a_max * dist), 0.03))
             self.get_logger().info(
-                f'→ {phase} 剩余 {dist:.2f} m, 速度 {speed:.2f} m/s '
+                f'→ {phase} осталось {dist:.2f} м, скорость {speed:.2f} м/с '
                 f'| 当前 ({self.x:+.2f}, {self.y:+.2f}) yaw={math.degrees(self.yaw.value):+.0f} deg'
-                f' -> 目标 ({gx:+.2f}, {gy:+.2f})')
+                f' -> цель ({gx:+.2f}, {gy:+.2f})')
             self._publish_status(phase)
 
     def _publish_status(self, text):
@@ -472,20 +472,20 @@ class Navigator(Node):
 
 
 # ================= 终端交互输入 =================
-HELP_TEXT = """输入格式 (每行一条, 回车执行):
-  x y          走到 (x, y), 朝向不变          例: 2.0 -1.5
-  x y 角度     走到 (x, y) 并转到该角度(度)    例: 1.0 1.0 90
-  stop         取消当前目标, 停在原地
-  s            看当前位置与状态
-  h            再看一遍这份帮助
-  q            退出
+HELP_TEXT = """Формат ввода (по строке, Enter - выполнить):
+  x y          ехать в (x, y), курс не меняется        Пример: 2.0 -1.5
+  x y угол     ехать в (x, y) и повернуть на угол(°)   Пример: 1.0 1.0 90
+  stop         отменить цель, стоять на месте
+  s            позиция и состояние
+  h            показать эту справку
+  q            выход
 
-坐标单位米, 原点是仿真启动位置; 底盘行程 ±9 m。""".strip()
+Метры, начало координат - место запуска симуляции; ход шасси ±9 м.""".strip()
 
 
 def pose_line(node):
     if not node.got_joints:
-        return '等待定位 (/joint_states)...'
+        return 'жду /joint_states...'
     return (f'x={node.x:+.2f} m  y={node.y:+.2f} m  '
             f'yaw={math.degrees(node.yaw.value):+.1f} deg')
 
@@ -495,14 +495,14 @@ def stdin_loop(node):
     time.sleep(0.8)      # 等第一帧定位, 横幅里好显示当前位置
     bar = '=' * 64
     print('\n' + bar)
-    print('  目标点导航 — 输入坐标, 机器人自己走过去')
-    print(f'  当前位置: {pose_line(node)}')
+    print('  Навигация по цели — введите координаты, робот поедет сам')
+    print(f'  Текущая позиция: {pose_line(node)}')
     print(bar)
     print(HELP_TEXT)
     print(bar + '\n')
     try:
         while rclpy.ok():
-            sys.stdout.write('坐标 > ')
+            sys.stdout.write('Координаты > ')
             sys.stdout.flush()
             line = sys.stdin.readline()
             if not line:
@@ -517,20 +517,20 @@ def stdin_loop(node):
                 print(HELP_TEXT)
                 continue
             if low in ('s', 'status'):
-                print(f'  位置: {pose_line(node)} | 状态: {node.state} '
-                      f'| 剩余航点: {len(node.queue)}')
+                print(f'  Позиция: {pose_line(node)} | Состояние: {node.state} '
+                      f'| Осталось целей: {len(node.queue)}')
                 continue
             if low in ('stop', 'c', 'cancel'):
-                node.cancel('终端输入 stop')
+                node.cancel('stop из терминала')
                 continue
             parts = line.split()
             try:
                 x, y = float(parts[0]), float(parts[1])
                 yaw = math.radians(float(parts[2])) if len(parts) > 2 else None
             except (ValueError, IndexError):
-                print('  x 格式不对, 应该是: x y [角度deg]   例: 2.0 -1.5  或  1.0 1.0 90')
+                print('  Неверный формат, нужно: x y [угол deg]   Пример: 2.0 -1.5  или  1.0 1.0 90')
                 continue
-            print('  已接收' + (f' ({x:+.2f}, {y:+.2f}) yaw={math.degrees(yaw):+.1f} deg'
+            print('  Принято' + (f' ({x:+.2f}, {y:+.2f}) yaw={math.degrees(yaw):+.1f} deg'
                               if yaw is not None else f' ({x:+.2f}, {y:+.2f})'))
             node.add_goal(x, y, yaw)
     except (KeyboardInterrupt, EOFError):
@@ -610,7 +610,7 @@ def main(args=None):
         pass
     finally:
         try:
-            node.cancel('退出')
+            node.cancel('выход')
             node.destroy_node()
         except Exception:  # noqa: BLE001
             pass
