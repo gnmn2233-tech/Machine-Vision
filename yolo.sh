@@ -3,7 +3,8 @@
 # =========================================
 #  1. 基础环境设置
 # =========================================
-WORKSPACE_DIR=~/gz_ros/yolo_ros2_ws
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_DIR="$ROOT/yolo_ros2_ws"
 
 # 检查目录是否存在
 if [ ! -d "$WORKSPACE_DIR" ]; then

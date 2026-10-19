@@ -5,9 +5,11 @@ echo "  启动避障节点 (obstacle_avoider)"
 echo "========================================="
 
 # 加载环境
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 source /opt/ros/jazzy/setup.bash
-source ~/gz_ros/yolo_ros2_ws/install/setup.bash
-source ~/gz_ros/obstacle_ws/install/setup.bash
+source "$ROOT/yolo_ros2_ws/install/setup.bash"
+source "$ROOT/obstacle_ws/install/setup.bash"
 
 # 键盘控制器共存: 平时静默、按方向键自动接管避障、松开交还 —— 不需要杀它
 

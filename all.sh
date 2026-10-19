@@ -6,16 +6,17 @@
 #   3) view_camera.sh        RViz2 + 静默发布 /depth_camera/colorized + 静态 TF
 # Ctrl+C 一次性收干净
 
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+ROOT="$PWD"
 
 echo "========================================="
 echo "  初始化"
 echo "========================================="
 
 source /opt/ros/jazzy/setup.bash
-source "$HOME/gz_ros/obstacle_ws/install/setup.bash" 2>/dev/null
-source "$HOME/gz_ros/yolo_ros2_ws/install/setup.bash" 2>/dev/null
-export GZ_SIM_RESOURCE_PATH="$HOME/gz_ros/mod:$GZ_SIM_RESOURCE_PATH"
+source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
+source "$ROOT/yolo_ros2_ws/install/setup.bash" 2>/dev/null
+export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
 
 # 清掉上次运行留下的所有残留进程
 echo "正在清理旧进程..."
@@ -31,21 +32,21 @@ if ! command -v ros2 >/dev/null 2>&1; then
     echo "✗ 找不到 ros2, 请确认 ROS 2 Jazzy 已安装"
     exit 1
 fi
-if [ ! -f "$HOME/gz_ros/robot_with_camera.sdf" ]; then
-    echo "✗ 找不到 $HOME/gz_ros/robot_with_camera.sdf"
+if [ ! -f "$ROOT/worlds/robot_with_camera.sdf" ]; then
+    echo "✗ 找不到 $ROOT/worlds/robot_with_camera.sdf"
     exit 1
 fi
 # obstacle_avoider: 没编译过 或 源码比 install 新 -> 自动编译
-PKG_SRC="$HOME/gz_ros/obstacle_ws/src/obstacle_avoider/obstacle_avoider"
+PKG_SRC="$ROOT/obstacle_ws/src/obstacle_avoider/obstacle_avoider"
 pkg_install_dir() {
-    ls -d "$HOME/gz_ros/obstacle_ws/install/obstacle_avoider/lib/python3"*/site-packages/obstacle_avoider 2>/dev/null | head -1
+    ls -d "$ROOT/obstacle_ws/install/obstacle_avoider/lib/python3"*/site-packages/obstacle_avoider 2>/dev/null | head -1
 }
 build_pkg() {
     echo "编译 obstacle_avoider ..."
-    if (cd "$HOME/gz_ros/obstacle_ws" && colcon build --packages-select obstacle_avoider) \
+    if (cd "$ROOT/obstacle_ws" && colcon build --packages-select obstacle_avoider) \
             > /tmp/all_sh_build.log 2>&1; then
         echo "✓ 编译完成"
-        source "$HOME/gz_ros/obstacle_ws/install/setup.bash" 2>/dev/null
+        source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
     else
         echo "✗ 编译失败, 最后 20 行日志:"
         tail -20 /tmp/all_sh_build.log
@@ -66,29 +67,28 @@ echo ""
 
 # ---- 依次启动四路 ----
 echo "[1/4] 仿真 + 键盘 + 话题桥..."
-bash start_simulation.sh &
+bash "$ROOT/start_simulation.sh" &
 SIM_PID=$!
 sleep 3
 
 echo "[2/4] YOLO 检测..."
-bash yolo.sh &
+bash "$ROOT/yolo.sh" &
 YOLO_PID=$!
 sleep 3
 
 echo "[3/4] RViz2 (相机图 + 轨迹)..."
-bash view_camera.sh &
+bash "$ROOT/view_camera.sh" &
 VIEW_PID=$!
 sleep 2
 
 echo "[4/4] 位置感知 (机器人/相机位姿 + TF)..."
-python3 robot_pose_monitor.py > /tmp/pose_monitor.log 2>&1 &
+python3 "$ROOT/nodes/robot_pose_monitor.py" > /tmp/pose_monitor.log 2>&1 &
 POSE_PID=$!
 sleep 3
 if kill -0 $POSE_PID 2>/dev/null; then
     echo "✓ 位置感知已启动: /robot_pose /camera_pose /odom /robot_path + TF"
     echo "  轨迹就在上面那个 RViz2 窗口里: Path(/robot_path) 已开, Fixed Frame=odom"
     echo "  机器人头顶会跟着显示坐标文字: x / y / yaw  (/robot_label)"
-    echo "  (想另开一个只看位姿的窗口: bash view_pose.sh, 可选)"
 else
     echo "⚠️  位置感知启动失败, 最后 5 行日志:"
     tail -5 /tmp/pose_monitor.log

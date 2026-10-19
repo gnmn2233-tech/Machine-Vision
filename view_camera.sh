@@ -6,8 +6,10 @@
 # 深度彩色图由本脚本后台的 depth_probe --publish 安静发布, 不弹窗、不打日志。
 # 静态 TF: RViz2 的 Image display 需要 TF, 把两个相机 frame 挂到 map 下(只求可查, 不用于对齐)。
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 source /opt/ros/jazzy/setup.bash
-source ~/gz_ros/obstacle_ws/install/setup.bash 2>/dev/null
+source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
 
 echo "========================================="
 echo "  相机图像查看 - 使用 RViz2"
@@ -46,7 +48,7 @@ sleep 2  # 等节点把 rclpy 起来, 否则紧接着的存活检查会误报
 
 if ! kill -0 $DEPTH_PUB_PID 2>/dev/null; then
     echo "⚠️  深度彩色图发布器没能起来, 先编译再重跑:"
-    echo "    cd ~/gz_ros/obstacle_ws && colcon build --packages-select obstacle_avoider"
+    echo "    cd "$ROOT/obstacle_ws" && colcon build --packages-select obstacle_avoider"
 else
     GRAPH=$(timeout 20 python3 - <<'PY' 2>/dev/null
 import time, rclpy
@@ -75,4 +77,4 @@ PY
 fi
 
 # 启动 RViz2 (robot_pose.rviz: Fixed Frame=odom + Path(/robot_path) + Odometry + TF)
-ros2 run rviz2 rviz2 -d "$HOME/gz_ros/robot_pose.rviz"
+ros2 run rviz2 rviz2 -d "$ROOT/config/robot_pose.rviz"

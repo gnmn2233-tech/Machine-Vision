@@ -34,42 +34,41 @@
 
 ```
 Machine-Vision/
-├── robot_with_camera.sdf          # Gazebo 世界 + 机器人模型（RGB 相机 + 深度相机）
-├── start_simulation.sh            # 仿真 + 键盘 + 全部话题桥
-├── all.sh                         # 一键：清理残留 + 自动编译避障包 + 依次起 仿真/YOLO/RViz
-├── keyboard_joint_controller.py   # 键盘控制（空闲静默，与避障协作）
-├── yolo.sh                        # 启动 YOLO 检测
-├── run_obstacle_avoider.sh        # 启动避障节点（含 LLM failover 配置 + 桥保活）
-├── view_camera.sh                 # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
-├── mod/                           # 仿真用第三方模型（车辆 / 行人 / 地面等）
-├── obstacle_ws/                   # colcon 工作区：避障节点 + depth_probe
-├── vlm_navigator/                 # colcon 包：VLM 相机旋转
-├── yolo_ros2_ws/                  # YOLO colcon 工作区（第三方）
-│
-│   ── 机器人/相机位置感知（本次新增） ──
-├── robot_pose_monitor.py          # 位置感知节点：位姿解算 + TF
-├── robot_pose.rviz                #   view_camera.sh 用的配置（Fixed Frame=odom，带轨迹）
-│
-│   ── 目标点导航（本次新增） ──
-├── navigate_to_pose.py            # 导航节点：输入坐标 → 平滑移动到坐标处
-├── run_navigate.sh                # 一键启动导航（可带坐标参数）
-└── requirements.txt               # 系统 Python 侧依赖
+├── all.sh                            # 一键：清理残留 + 自动编译避障包 + 依次起 仿真/YOLO/RViz
+├── start_simulation.sh               # 仿真 + 键盘 + 全部话题桥
+├── yolo.sh                           # 启动 YOLO 检测
+├── run_obstacle_avoider.sh           # 启动避障节点（含 LLM failover 配置 + 桥保活）
+├── run_navigate.sh                   # 一键启动导航（可带坐标参数）
+├── view_camera.sh                    # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
+├── nodes/                            # 本仓库写的 ROS 节点
+│   ├── keyboard_joint_controller.py  # 键盘控制（空闲静默，与避障协作）
+│   ├── robot_pose_monitor.py         # 位置感知节点：位姿解算 + TF
+│   └── navigate_to_pose.py           # 导航节点：输入坐标 → 平滑移动到坐标处
+├── config/
+│   ├── robot_pose.rviz               # view_camera.sh 用的 RViz 配置（Fixed Frame=odom，带轨迹）
+│   └── requirements.txt              # 系统 Python 侧依赖
+├── worlds/
+│   └── robot_with_camera.sdf         # Gazebo 世界 + 机器人模型（RGB 相机 + 深度相机）
+├── mod/                              # 仿真用第三方模型（车辆 / 行人 / 地面等）
+├── obstacle_ws/                      # colcon 工作区：避障节点 + depth_probe
+├── vlm_navigator/                    # colcon 包：VLM 相机旋转
+└── yolo_ros2_ws/                     # YOLO colcon 工作区（第三方）
 ```
 
 ## 快速开始
 
-> **放哪里**：各脚本按 `~/gz_ros` 这个目录布局引用路径（例如 `$HOME/gz_ros/mod`、
-> `$HOME/gz_ros/yolo_ros2_ws/install`）。建议直接克隆到这个位置：
+> **放哪里**：脚本都按「自己所在目录」定位仓库根（顶部一行 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"），
+> 所以克隆到任何位置都能直接跑，不要求 `~/gz_ros`、也不需要软链接：
 > ```bash
-> git clone https://github.com/gnmn2233-tech/Machine-Vision ~/gz_ros
+> git clone https://github.com/gnmn2233-tech/Machine-Vision
 > ```
-> 若克隆到别处，可建个软链接：`ln -s <你的目录> ~/gz_ros`。
+> 只有手写 `cd yolo_ros2_ws && colcon build` 这类命令，才需要你自己先 cd 到仓库根目录。
 
 ### 1. 安装依赖
 
 ```bash
 sudo apt install ros-jazzy-ros-gz ros-jazzy-ros-gz-interfaces ros-jazzy-rviz2 ros-jazzy-tf2-ros
-pip3 install -r requirements.txt      # 报 externally-managed-environment 时加 --break-system-packages
+pip3 install -r config/requirements.txt      # 报 externally-managed-environment 时加 --break-system-packages
 ```
 
 ### 2. 编译两个工作区
@@ -94,7 +93,7 @@ cd obstacle_ws && source /opt/ros/jazzy/setup.bash \
 bash all.sh        # 一键：仿真 + YOLO + RViz（会先自动编译避障包）
 ```
 
-或分终端（都不要求当前目录，但 `all.sh` 用相对路径，必须在仓库根目录执行）：
+或分终端（脚本都自定位仓库根，任意目录执行都行）：
 
 ```bash
 bash start_simulation.sh        # 终端1：仿真 + 键盘 + 全部话题桥
@@ -106,7 +105,7 @@ bash view_camera.sh             # 终端4：RViz + 深度彩色图（可选）
 ### 4. 位置感知
 
 ```bash
-python3 robot_pose_monitor.py   # 需要 start_simulation.sh 已在运行
+python3 nodes/robot_pose_monitor.py   # 需要 start_simulation.sh 已在运行
 # 轨迹/位姿不用另开窗口：all.sh 第 3 路的 RViz2 已带 Path(/robot_path) 与 /odom 箭头
 ```
 
@@ -142,7 +141,7 @@ base 世界位姿 = (x, y, 0.075, yaw)             base 连杆比模型原点高
 ### 在终端查看当前位置（使用者最常用）
 
 **前提**：两个终端在跑 —— `bash start_simulation.sh`（提供 `/joint_states`）
-和 `python3 robot_pose_monitor.py`（位置感知节点）。
+和 `python3 nodes/robot_pose_monitor.py`（位置感知节点）。
 
 **① 最省事：位置感知节点自己每 1 秒打印一行**
 
@@ -208,7 +207,7 @@ ros2 topic echo /camera_pose --once
 
 | 现象 | 原因 / 处理 |
 |------|------|
-| `--once` 一直卡住不输出 | 没人在发布 → 确认 `start_simulation.sh` 和 `robot_pose_monitor.py` 都在跑 |
+| `--once` 一直卡住不输出 | 没人在发布 → 确认 `start_simulation.sh` 和 `nodes/robot_pose_monitor.py` 都在跑 |
 | `ros2: command not found` | 忘了 `source /opt/ros/jazzy/setup.bash`，或不在 WSL 里 |
 | 数值一直是 0 | `/joint_states` 没数据 → `ros2 topic echo /joint_states --once`，应含 `drive_x_joint` / `drive_y_joint` / `base_yaw_joint` |
 

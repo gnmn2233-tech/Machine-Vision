@@ -17,8 +17,10 @@
 # 不要 set -u: /opt/ros/jazzy/setup.bash 内部引用未定义变量会直接退出
 set -o pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 source /opt/ros/jazzy/setup.bash
-export GZ_SIM_RESOURCE_PATH="$HOME/gz_ros/mod:${GZ_SIM_RESOURCE_PATH:-}"
+export GZ_SIM_RESOURCE_PATH="$ROOT/mod:${GZ_SIM_RESOURCE_PATH:-}"
 
 if ! pgrep -f "gz sim" >/dev/null 2>&1; then
     echo "✗ 没检测到 Gazebo 仿真进程。请先另开终端运行: bash start_simulation.sh"
@@ -33,4 +35,4 @@ fi
 pkill -9 -f "navigate_to_pose.py" 2>/dev/null
 sleep 0.5
 
-exec python3 -u "$HOME/gz_ros/navigate_to_pose.py" "$@"
+exec python3 -u "$ROOT/nodes/navigate_to_pose.py" "$@"

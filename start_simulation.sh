@@ -4,10 +4,12 @@ echo "========================================="
 echo "  Gazebo Harmonic 相机仿真启动脚本"
 echo "========================================="
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # 加载 ROS 2 Jazzy 环境 (脚本自己 source, 不依赖外部)
 source /opt/ros/jazzy/setup.bash
 
-export GZ_SIM_RESOURCE_PATH="$HOME/gz_ros/mod:$GZ_SIM_RESOURCE_PATH"
+export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
 
 echo "正在清理旧进程..."
 pkill -9 -f "gz sim" 2>/dev/null
@@ -22,7 +24,7 @@ pkill -9 -f "yolo_ros2" 2>/dev/null
 sleep 1
 
 echo "启动 Gazebo..."
-gz sim -r "$HOME/gz_ros/robot_with_camera.sdf" &
+gz sim -r "$ROOT/worlds/robot_with_camera.sdf" &
 GAZEBO_PID=$!
 
 echo "等待 Gazebo 启动..."
@@ -35,7 +37,7 @@ fi
 echo "✓ Gazebo 启动成功 (PID: $GAZEBO_PID)"
 
 echo "启动键盘关节控制器..."
-python3 "$HOME/gz_ros/keyboard_joint_controller.py" &
+python3 "$ROOT/nodes/keyboard_joint_controller.py" &
 CONTROLLER_PID=$!
 
 # ---- 同名桥接：图像和信息 ----
