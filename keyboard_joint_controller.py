@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, String
 from pynput import keyboard
 import threading
 import math
@@ -69,6 +69,10 @@ class KeyboardJointController(Node):
         # 订阅真实关节角: 接管避障瞬间从此角度起步, 避免位置跳变
         qos = QoSProfile(depth=5, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         self.js_sub = self.create_subscription(JointState, '/joint_states', self.on_joint_states, qos)
+        # 导航节点状态: MOVING 期间本节点完全静默, 否则 50Hz 空转会把导航的位置指令压回
+        self._nav_moving = False
+        self.nav_sub = self.create_subscription(
+            String, '/navigation_status', self.on_nav_status, 10)
         self._real_angle = 0.0
         self._real_seen = False      # 是否收到过真实关节角 (没收到时接管不能用 0 锚位!)
         self._real_warned = False
@@ -104,6 +108,13 @@ class KeyboardJointController(Node):
             self._real_angle = msg.position[idx]
             self._real_seen = True
 
+    def on_nav_status(self, msg):
+        """导航开始/结束时让路与恢复。"""
+        moving = msg.data.strip().upper().startswith('MOVING')
+        if moving != self._nav_moving:
+            self._nav_moving = moving
+            self.get_logger().info('导航接管中, 键盘静默' if moving else '导航已结束, 键盘恢复')
+
     def print_help(self):
         print("\n控制说明：")
         print("  左箭头 (←) : 按住持续向左转，松开停止；点按一下转一下")
@@ -118,6 +129,8 @@ class KeyboardJointController(Node):
         - 空闲 -> 静默: 发布 override=0, 不碰关节话题 (让避障独占)
         - 卡键保险: 超过 8s 无键盘事件仍显示按住 -> 松键事件多半丢了, 自动复位
         """
+        if self._nav_moving:
+            return   # 导航接管期间不碰关节话题, 也不发 override
         active = False
         with self._lock:
             if (self._pressed or self._move) and \

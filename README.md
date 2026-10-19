@@ -17,6 +17,9 @@
 - **机器人/相机位置感知**（`robot_pose_monitor.py`，本仓库新增）：由 `/joint_states` 真值关节角解算
   `x / y / yaw`，发布 `/robot_pose`、`/camera_pose`、`/odom`、`/robot_path` 与 TF
   `odom → base_link → camera_link → camera_optical_frame`。
+- **目标点导航**（`navigate_to_pose.py`，本仓库新增）：给一个坐标（命令行 / 终端输入 / `/goal_pose` /
+  `/navigate_to`），机器人用已有自定位平滑走过去并转向指定朝向，到点误差约 2 cm；
+  带定位断流、被抢占、超时、越界四重保护。
 
 ## 环境要求
 
@@ -45,8 +48,11 @@ Machine-Vision/
 │
 │   ── 机器人/相机位置感知（本次新增） ──
 ├── robot_pose_monitor.py          # 位置感知节点：位姿解算 + TF
-├── view_pose.sh                   # RViz2 查看位姿与轨迹
-├── robot_pose.rviz                #   两个可视化脚本共用的 RViz 配置
+├── robot_pose.rviz                #   view_camera.sh 用的配置（Fixed Frame=odom，带轨迹）
+│
+│   ── 目标点导航（本次新增） ──
+├── navigate_to_pose.py            # 导航节点：输入坐标 → 平滑移动到坐标处
+├── run_navigate.sh                # 一键启动导航（可带坐标参数）
 └── requirements.txt               # 系统 Python 侧依赖
 ```
 
@@ -101,7 +107,7 @@ bash view_camera.sh             # 终端4：RViz + 深度彩色图（可选）
 
 ```bash
 python3 robot_pose_monitor.py   # 需要 start_simulation.sh 已在运行
-bash view_pose.sh               # 另开终端：单独的位姿窗口（可选）
+# 轨迹/位姿不用另开窗口：all.sh 第 3 路的 RViz2 已带 Path(/robot_path) 与 /odom 箭头
 ```
 
 > `all.sh` 已经把它接成第 4 路，并且第 3 路那个 RViz2 窗口本身就用本文的 `robot_pose.rviz`
@@ -212,6 +218,137 @@ ros2 node list                  # 应能看到 /robot_pose_monitor
 ros2 run tf2_tools view_frames  # 生成 TF 树 PDF
 ```
 
+## 目标点导航（输入坐标，机器人自己走过去）
+
+`navigate_to_pose.py` 把「给一个坐标」变成「机器人平滑移动到这个坐标」。
+它复用机器人已有的自定位（`/joint_states` 真值 → `x / y / yaw`），不重复造轮子。
+
+**为什么不是 `/cmd_vel` 那一套**：本底盘不是差速轮，而是两个 prismatic 关节
+（`drive_x_joint` / `drive_y_joint`，各 ±9 m）加一个转向关节（`base_yaw_joint`），由 Gazebo 的
+`JointPositionController` 做**位置伺服**——没有 `/cmd_vel` 可发，所以导航发布的是「下一个位置指令」。
+
+**运动方式和键盘控制一致：只会「原地转向」和「沿车头前进」，不横移。**
+
+1. 目标方向与车头夹角超过 `heading_gate`（默认 8.6°）→ 先**原地转向**对准，期间不前进；
+2. 对准后沿车头方向直行，每拍前进 `v·dt`（`v = min(v_max, √(2·a·dist))`，离终点越慢），
+   边走边用 `turn_gain` 做小角度修正，车头始终朝运动方向；
+3. 进 2 cm 内停车；若目标带了朝向，再原地转到该朝向。
+
+指令用内部累积量而非「实测 + 增量」递推——位置伺服有滞后，指令贴着实测就没有误差可追，
+转向会被拖成每 tick 零点几度（实测约 2°/s，累积后约 50°/s）。
+
+### 开跑
+
+```bash
+bash start_simulation.sh     # 终端1：仿真 + 话题桥（bash all.sh 也可以）
+bash run_navigate.sh         # 终端2：不带参数 = 交互模式
+```
+
+终端2 会先打印当前位置和用法，然后停在 `坐标 >` 提示符等你输入：
+
+```
+================================================================
+  目标点导航 — 输入坐标, 机器人自己走过去
+  当前位置: x=+0.00 m  y=+0.00 m  yaw=+0.0 deg
+================================================================
+输入格式 (每行一条, 回车执行):
+  x y          走到 (x, y), 朝向不变          例: 2.0 -1.5
+  x y 角度     走到 (x, y) 并转到该角度(度)    例: 1.0 1.0 90
+  stop         取消当前目标, 停在原地
+  s            看当前位置与状态
+  h            再看一遍这份帮助
+  q            退出
+
+坐标单位米, 原点是仿真启动位置; 底盘行程 ±9 m。
+================================================================
+
+坐标 > 1.0 1.0
+  已接收 (+1.00, +1.00)
+[INFO] → 前进中 剩余 1.41 m, 速度 0.50 m/s | 当前 (+0.00, +0.00) -> 目标 (+1.00, +1.00)
+[INFO] ✓ 已到达 (+1.00, +1.00) | 实际 x=+0.99 y=+0.99 yaw=+0.0 deg | 误差 19 mm
+坐标 > 
+```
+
+到点后提示符会重新出现，可以接着下一条目标。
+
+也可以在命令行一次给全：
+
+```bash
+bash run_navigate.sh 2.0 -1.5              # 走到 (2, -1.5)，朝向不变
+bash run_navigate.sh 2.0 -1.5 --yaw 90     # 走到 (2, -1.5) 并转到 90 度
+bash run_navigate.sh 1 0 2 1 0 0           # 多航点：(1,0) → (2,1) → (0,0)
+bash run_navigate.sh -p v_max:=0.8 3 -3    # 改最大速度 (m/s)
+```
+
+### 也可以用话题 / RViz
+
+| 入口 | 用法 |
+|------|------|
+| `/goal_pose`（`geometry_msgs/PoseStamped`） | RViz 里用 **2D Goal Pose** 点一下即走 |
+| `/navigate_to`（`geometry_msgs/Pose2D`） | `ros2 topic pub --once /navigate_to geometry_msgs/msg/Pose2D "{x: 1.0, y: 1.5, theta: 1.5708}"` |
+| `/nav_cancel`（`std_msgs/Bool`） | `ros2 topic pub --once /nav_cancel std_msgs/msg/Bool "{data: true}"` |
+| 终端输入 | 交互模式下输入 `stop` 回车，或 `q` 退出 |
+
+> `/goal_pose` 里的 `orientation` 默认被忽略（默认四元数 `w=1` 视为「没指定朝向」）。
+> 想让 RViz 点出来的朝向也生效，启动时加 `-p use_orientation:=true`。
+
+### 怎么看进度 / 完成
+
+```bash
+ros2 topic echo /navigation_status      # IDLE / MOVING / ARRIVED + 实时坐标
+ros2 topic echo /nav_goal_reached --once
+```
+
+节点每秒打印一次进度，到点打印误差：
+
+```
+[INFO] [navigate_to_pose]: → 前进中 剩余 0.92 m, 速度 0.50 m/s | 当前 (+0.82, -0.41) -> 目标 (+0.00, +0.00)
+[INFO] [navigate_to_pose]: ✓ 已到达 (+0.00, +0.00) | 实际 x=+0.02 y=-0.01 yaw=+60.0 deg | 误差 19 mm
+```
+
+### 可调参数
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `v_max` | 0.5 | 平移最大速度 (m/s) |
+| `a_max` | 1.0 | 加减速 (m/s²)，决定进站减速距离 |
+| `w_max` | 1.0 | 转向最大角速度 (rad/s) |
+| `arrive_eps` | 0.02 | 到点判定的位置阈值 (m) |
+| `yaw_eps` | 0.02 | 到点判定的朝向阈值 (rad，≈1.1°) |
+| `control_hz` | 50 | 控制与发布频率 |
+| `goal_timeout` | 180 | 单个目标点的超时 (s) |
+| `heading_gate` | 0.15 | 朝向偏差超过该值 (rad，≈8.6°) 先原地转向再走 |
+| `turn_gain` | 2.0 | 前进时朝向修正的 P 增益 |
+| `use_orientation` | false | 让 `/goal_pose` 里的四元数当作目标朝向 |
+
+改法：`bash run_navigate.sh -p v_max:=0.8 3 -3`（`-p` 会转成 ROS 参数传给节点）。
+
+### 安全保护（实测过的四种）
+
+| 保护 | 行为 |
+|------|------|
+| 目标越界 | 超出 ±9 m 行程直接拒绝并报错，不发指令 |
+| 定位断流 | `/joint_states` 断 1 s → **暂停推进**（机器人自然停住），断 6 s → 放弃目标；恢复后自动接着走 |
+| 控制权被抢 | 半秒内反而离目标更远 25 cm → 判定被键盘/避障/手动接管，立即中止导航并交还 |
+| 超时 | 单个目标 180 s 未到点 → 停车 |
+
+导航运动期间节点会发 `/avoider_override=1`（与键盘控制器的约定一致，让避障节点让路）；
+停止运动或空闲时静默，不覆盖键盘的接管信号。
+
+`keyboard_joint_controller.py` 订阅了 `/navigation_status`：状态为 `MOVING` 时键盘控制器**完全静默**
+（不碰关节话题、也不发 override），日志打 `导航接管中, 键盘静默`；导航一结束自动打
+`导航已结束, 键盘恢复`，方向键立刻又能用。所以 `all.sh` 全栈开着也不会和导航抢关节话题。
+
+### 排错
+
+| 现象 | 原因 / 处理 |
+|------|------|
+| `✗ 没检测到 Gazebo 仿真进程` | 先在另一个终端 `bash start_simulation.sh` |
+| 一直「还没收到 /joint_states」 | 话题桥没起：`ros2 topic echo /joint_states --once` 应有三个关节；也可 `ros2 node list --no-daemon` 确认 `/ros_gz_bridge` 在 |
+| 走了一半自己停 | 看日志：`定位中断` 会等恢复；`控制权被抢占` 说明有别的节点在发 `/drive_*` |
+| 机器人抖动 / 抢关节 | 确认只有一个导航或键盘节点在跑：`pgrep -af 'navigate_to_pose|keyboard_joint' ` |
+| 到点后轻微残留误差 | 正常，到点阈值 20 mm（视野内看不出）；要更严就调小 `arrive_eps`，但仿真物理抖动可能反而到不了 |
+
 ## 话题速查
 
 | 话题 | 类型 | 说明 |
@@ -229,6 +366,11 @@ ros2 run tf2_tools view_frames  # 生成 TF 树 PDF
 | `/avoider_override` | `std_msgs/Float64` | 键盘手动接管信号（1 = 手动中） |
 | `/yolo/detections` | `yolo_msgs/DetectionArray` | YOLO 检测结果 |
 | `/robot_pose` 等 | — | 见上一节「位置感知」 |
+| `/navigation_status` | `std_msgs/String` | 导航状态（IDLE / MOVING / ARRIVED + 实时坐标） |
+| `/nav_goal_reached` | `std_msgs/Bool` | 到点信号（true = 到达） |
+| `/navigate_to` | `geometry_msgs/Pose2D` | 输入导航目标（x, y, theta） |
+| `/goal_pose` | `geometry_msgs/PoseStamped` | 输入导航目标（RViz 2D Goal Pose 走这条） |
+| `/nav_cancel` | `std_msgs/Bool` | 取消当前导航 |
 
 ## 在 Windows 上克隆（重要）
 
