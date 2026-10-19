@@ -69,22 +69,18 @@ echo ""
 echo "[1/4] 仿真 + 键盘 + 话题桥..."
 bash "$ROOT/start_simulation.sh" &
 SIM_PID=$!
-sleep 3
 
 echo "[2/4] YOLO 检测..."
 bash "$ROOT/yolo.sh" &
 YOLO_PID=$!
-sleep 3
 
 echo "[3/4] RViz2 (相机图 + 轨迹)..."
 bash "$ROOT/view_camera.sh" &
 VIEW_PID=$!
-sleep 2
 
 echo "[4/4] 位置感知 (机器人/相机位姿 + TF)..."
 python3 "$ROOT/nodes/robot_pose_monitor.py" > /tmp/pose_monitor.log 2>&1 &
 POSE_PID=$!
-sleep 3
 if kill -0 $POSE_PID 2>/dev/null; then
     echo "✓ 位置感知已启动: /robot_pose /camera_pose /odom /robot_path + TF"
     echo "  轨迹就在上面那个 RViz2 窗口里: Path(/robot_path) 已开, Fixed Frame=odom"

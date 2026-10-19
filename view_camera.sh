@@ -44,7 +44,6 @@ TF_DEPTH_PID=$!
 # 深度彩色图发布 (静默后台; RViz2 里 Add -> Image -> /depth_camera/colorized)
 ros2 run obstacle_avoider depth_probe --publish --quiet &
 DEPTH_PUB_PID=$!
-sleep 2  # 等节点把 rclpy 起来, 否则紧接着的存活检查会误报
 
 if ! kill -0 $DEPTH_PUB_PID 2>/dev/null; then
     echo "⚠️  深度彩色图发布器没能起来, 先编译再重跑:"

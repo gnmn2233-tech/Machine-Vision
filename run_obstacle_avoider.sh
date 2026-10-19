@@ -25,7 +25,6 @@ ensure_bridge() {
     name="${name//\//_}_$$"          # 唯一节点名, 避免与已有桥同名被杀
     echo "补起桥: $topic ($*) -> 节点 $name"
     ros2 run ros_gz_bridge parameter_bridge "$@" --ros-args -r "__node:=$name" &
-    sleep 3
 }
 ensure_bridge /camera_joint_controller/commands '/camera_joint_controller/commands@std_msgs/msg/Float64]gz.msgs.Double'
 ensure_bridge /joint_states '/joint_state@sensor_msgs/msg/JointState[gz.msgs.Model' -r '/joint_state:=/joint_states'

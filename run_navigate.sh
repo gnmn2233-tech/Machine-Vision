@@ -33,6 +33,5 @@ fi
 
 # 清残留导航节点, 避免多个发布者抢关节话题
 pkill -9 -f "navigate_to_pose.py" 2>/dev/null
-sleep 0.5
 
 exec python3 -u "$ROOT/nodes/navigate_to_pose.py" "$@"

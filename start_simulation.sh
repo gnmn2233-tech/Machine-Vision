@@ -21,20 +21,16 @@ pkill -9 -f "vlm_camera_rotator" 2>/dev/null
 pkill -9 -f "obstacle_avoider" 2>/dev/null
 # 清 yolo 残留 (避免重复实例)
 pkill -9 -f "yolo_ros2" 2>/dev/null
-sleep 1
 
 echo "启动 Gazebo..."
 gz sim -r "$ROOT/worlds/robot_with_camera.sdf" &
 GAZEBO_PID=$!
 
-echo "等待 Gazebo 启动..."
-sleep 5
-
 if ! kill -0 $GAZEBO_PID 2>/dev/null; then
     echo "✗ Gazebo 启动失败"
     exit 1
 fi
-echo "✓ Gazebo 启动成功 (PID: $GAZEBO_PID)"
+echo "✓ Gazebo 已启动 (PID: $GAZEBO_PID)"
 
 echo "启动键盘关节控制器..."
 python3 "$ROOT/nodes/keyboard_joint_controller.py" &
