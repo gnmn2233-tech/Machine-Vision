@@ -73,6 +73,7 @@ class KeyboardJointController(Node):
         self._nav_moving = False
         self.nav_sub = self.create_subscription(
             String, '/navigation_status', self.on_nav_status, 10)
+        self._real = {}              # 关节名 -> 最新实测位置: 接管时三个关节都据此锚定
         self._real_angle = 0.0
         self._real_seen = False      # 是否收到过真实关节角 (没收到时接管不能用 0 锚位!)
         self._real_warned = False
@@ -99,21 +100,69 @@ class KeyboardJointController(Node):
         self.print_help()
 
     def on_joint_states(self, msg):
-        """记录真实关节角, 接管避障瞬间用 (避免从 0 起步把镜头拉回)。"""
-        try:
-            idx = list(msg.name).index('base_yaw_joint')
-        except ValueError:
-            return
+        """记录真实关节角, 接管瞬间用 (避免从 0 起步把镜头/底盘拉回)。"""
         with self._lock:
-            self._real_angle = msg.position[idx]
-            self._real_seen = True
+            for name, pos in zip(msg.name, msg.position):
+                if name in ('base_yaw_joint', 'drive_x_joint', 'drive_y_joint'):
+                    self._real[name] = float(pos)
+            if 'base_yaw_joint' in self._real:
+                self._real_angle = self._real['base_yaw_joint']
+                self._real_seen = True
 
     def on_nav_status(self, msg):
         """导航开始/结束时让路与恢复。"""
         moving = msg.data.strip().upper().startswith('MOVING')
-        if moving != self._nav_moving:
-            self._nav_moving = moving
-            self.get_logger().info('导航接管中, 键盘静默' if moving else '导航已结束, 键盘恢复')
+        if moving == self._nav_moving:
+            return
+        self._nav_moving = moving
+        with self._lock:
+            if moving:
+                # 接管瞬间清掉按键与缓停残留: 导航期间本节点不 tick, 残量会冻结在原地,
+                # 等导航结束一次性补发, 把机器人从到点位置拉回键盘自己的旧坐标 (到点后回退)
+                self._pressed = None
+                self._move = None
+                self.smooth.set_target(self.smooth.pos)
+                self.drive_x.set_target(self.drive_x.pos)
+                self.drive_y.set_target(self.drive_y.pos)
+                self.get_logger().info('导航接管中, 键盘静默')
+            else:
+                # 交还瞬间以实测关节角重新锚定: 键盘从机器人当前实际位置接着走, 不带旧坐标
+                ok_yaw = self._anchor_yaw()
+                ok_drive = self._anchor_drive()
+                self.get_logger().info(
+                    '导航已结束, 键盘恢复'
+                    + ('' if (ok_yaw and ok_drive) else ' (未收到 /joint_states, 沿用键盘内部状态)'))
+
+    def _warn_once_real(self):
+        if not self._real_warned:
+            self._real_warned = True
+            self.get_logger().warn(
+                '未收到 /joint_states 真实关节角 (检查 joint_state 桥是否带 '
+                "-r /joint_state:=/joint_states), 沿用键盘自身状态接管")
+
+    def _anchor_yaw(self):
+        """以实测角为接管基准: 键盘自己的 pos 还停在它上次停下的角度,
+        导航或避障转过之后一按键就会被拉回旧角度。"""
+        v = self._real.get('base_yaw_joint')
+        if v is None:
+            self._warn_once_real()
+            return False
+        self.smooth.pos = self.smooth.target = v
+        self.smooth.vel = 0.0
+        return True
+
+    def _anchor_drive(self):
+        """同上, 锚定两个平移关节: 否则导航把机器人挪到别处后, 第一次按前进
+        会把目标写成键盘旧位置 (常见就是原点), 机器人当场弹回去。"""
+        x, y = self._real.get('drive_x_joint'), self._real.get('drive_y_joint')
+        if x is None or y is None:
+            self._warn_once_real()
+            return False
+        self.drive_x.pos = self.drive_x.target = x
+        self.drive_x.vel = 0.0
+        self.drive_y.pos = self.drive_y.target = y
+        self.drive_y.vel = 0.0
+        return True
 
     def print_help(self):
         print("\n控制说明：")
@@ -204,42 +253,30 @@ class KeyboardJointController(Node):
                     if self._pressed != 'left':
                         # 锚定接管起点: 收到过真实角 → 从真实角度起步 (零跳变);
                         # 桥断了 → 沿用键盘自身已发布角, 绝不回 0!
-                        if self._real_seen:
-                            self._press_base = self._real_angle
-                            self.smooth.pos = self._real_angle
-                            self.smooth.target = self._real_angle
-                            self.smooth.vel = 0.0
-                        else:
-                            self._press_base = self.smooth.pos
-                            if not self._real_warned:
-                                self._real_warned = True
-                                self.get_logger().warn(
-                                    '未收到 /joint_states 真实关节角 (检查 joint_state 桥是否带 '
-                                    "-r /joint_state:=/joint_states), 沿用键盘自身角度接管")
+                        self._anchor_yaw()
+                        self._press_base = self.smooth.pos
                         self.smooth.step_delta(+self.press_step)  # 首按转量 (点按/启动)
                     self._pressed = 'left'
             elif key == keyboard.Key.right:
                 with self._lock:
                     if self._pressed != 'right':
-                        if self._real_seen:
-                            self._press_base = self._real_angle
-                            self.smooth.pos = self._real_angle
-                            self.smooth.target = self._real_angle
-                            self.smooth.vel = 0.0
-                        else:
-                            self._press_base = self.smooth.pos
-                            if not self._real_warned:
-                                self._real_warned = True
-                                self.get_logger().warn(
-                                    '未收到 /joint_states 真实关节角 (检查 joint_state 桥是否带 '
-                                    "-r /joint_state:=/joint_states), 沿用键盘自身角度接管")
+                        self._anchor_yaw()
+                        self._press_base = self.smooth.pos
                         self.smooth.step_delta(-self.press_step)
                     self._pressed = 'right'
             elif key == keyboard.Key.up:
                 with self._lock:
+                    if self._move != 'up':
+                        if self._pressed is None:
+                            self._anchor_yaw()   # 前进方向按当前朝向分解, 朝向也得先对齐
+                        self._anchor_drive()
                     self._move = 'up'
             elif key == keyboard.Key.down:
                 with self._lock:
+                    if self._move != 'down':
+                        if self._pressed is None:
+                            self._anchor_yaw()
+                        self._anchor_drive()
                     self._move = 'down'
             elif key == keyboard.Key.esc:
                 self.get_logger().info("ESC 退出，关闭键盘控制器")
