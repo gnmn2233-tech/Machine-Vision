@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "========================================="
-echo "  启动避障节点 (obstacle_avoider)"
+echo "  Объезд препятствий (obstacle_avoider)"
 echo "========================================="
 
 # 加载环境
@@ -23,7 +23,7 @@ ensure_bridge() {
     fi
     local name="bridge_${topic#/}"
     name="${name//\//_}_$$"          # 唯一节点名, 避免与已有桥同名被杀
-    echo "补起桥: $topic ($*) -> 节点 $name"
+    echo "Мост: $topic ($*) -> узел $name"
     ros2 run ros_gz_bridge parameter_bridge "$@" --ros-args -r "__node:=$name" &
 }
 ensure_bridge /camera_joint_controller/commands '/camera_joint_controller/commands@std_msgs/msg/Float64]gz.msgs.Double'

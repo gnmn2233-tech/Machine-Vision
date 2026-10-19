@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "========================================="
-echo "  Gazebo Harmonic 相机仿真启动脚本"
+echo "  Симуляция камеры Gazebo Harmonic"
 echo "========================================="
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +11,7 @@ source /opt/ros/jazzy/setup.bash
 
 export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
 
-echo "正在清理旧进程..."
+echo "Очистка..."
 pkill -9 -f "gz sim" 2>/dev/null
 pkill -9 -f "ros_gz_bridge" 2>/dev/null
 pkill -9 -f "keyboard_joint_controller.py" 2>/dev/null
@@ -22,17 +22,17 @@ pkill -9 -f "obstacle_avoider" 2>/dev/null
 # 清 yolo 残留 (避免重复实例)
 pkill -9 -f "yolo_ros2" 2>/dev/null
 
-echo "启动 Gazebo..."
+echo "Запуск Gazebo..."
 gz sim -r "$ROOT/worlds/robot_with_camera.sdf" &
 GAZEBO_PID=$!
 
 if ! kill -0 $GAZEBO_PID 2>/dev/null; then
-    echo "✗ Gazebo 启动失败"
+    echo "✗ Gazebo не стартовал"
     exit 1
 fi
-echo "✓ Gazebo 已启动 (PID: $GAZEBO_PID)"
+echo "✓ Gazebo запущен (PID: $GAZEBO_PID)"
 
-echo "启动键盘关节控制器..."
+echo "Запуск контроллера шарниров..."
 python3 "$ROOT/nodes/keyboard_joint_controller.py" &
 CONTROLLER_PID=$!
 
@@ -85,30 +85,30 @@ ros2 run ros_gz_bridge parameter_bridge \
 
 echo ""
 echo "========================================="
-echo "  ✅ 仿真启动完成！"
+echo "  ✅ Симуляция готова!"
 echo "========================================="
-echo "图像话题 (ROS): /camera"
-echo "相机信息话题 : /camera/camera_info"
-echo "深度图话题   : /depth_camera (32FC1 米, inf=未命中)"
-echo "深度内参话题 : /depth_camera/camera_info"
-echo "关节命令话题 : /camera_joint_controller/commands"
-echo "底盘驱动话题 : /drive_x/commands /drive_y/commands (Float64 位置)"
+echo "Изображение (ROS): /camera"
+echo "Параметры камеры : /camera/camera_info"
+echo "Глубина          : /depth_camera (32FC1, м, inf=нет данных)"
+echo "Параметры глубины: /depth_camera/camera_info"
+echo "Команды шарниров : /camera_joint_controller/commands"
+echo "Привод шасси     : /drive_x/commands /drive_y/commands (Float64)"
 echo ""
-echo "查看图像:"
+echo "Изображение:"
 echo "  ros2 run rqt_image_view rqt_image_view /camera"
 echo ""
-echo "查看深度/测距:"
-echo "  RViz2: Add -> Image -> /depth_camera/colorized   # 深度彩色图(越红越近), view_camera.sh 会自动发布"
-echo "  bash view_camera.sh                               # 起 RViz2 并发布上面那路彩色深度图"
-echo "  ros2 run obstacle_avoider depth_probe             # 打印左/中/右三区最近距离"
-echo "  ros2 topic echo /nearest_obstacle                 # 最近障碍距离(米), 无碍为 inf"
+echo "Глубина / дистанция:"
+echo "  RViz2: Add -> Image -> /depth_camera/colorized   # цветная карта глубины, публикует view_camera.sh"
+echo "  bash view_camera.sh                               # RViz2 + цветная карта глубины"
+echo "  ros2 run obstacle_avoider depth_probe             # дистанции слева/по центру/справа"
+echo "  ros2 topic echo /nearest_obstacle                 # ближайшее препятствие (м), inf = свободно"
 echo ""
-echo "手动转动关节测试:"
+echo "Поворот шарниров вручную:"
 echo "  gz topic -t /camera_joint_controller/commands -m gz.msgs.Double -p \"data: 1.0\""
 echo "========================================="
 
 cleanup() {
-    echo "正在停止所有进程..."
+    echo "Стоп: все процессы..."
     kill $GAZEBO_PID 2>/dev/null
     kill $CONTROLLER_PID 2>/dev/null
     kill $BRIDGE_IMAGE_PID 2>/dev/null

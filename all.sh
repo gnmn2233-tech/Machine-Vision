@@ -10,7 +10,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 ROOT="$PWD"
 
 echo "========================================="
-echo "  初始化"
+echo "  Инициализация"
 echo "========================================="
 
 source /opt/ros/jazzy/setup.bash
@@ -19,7 +19,7 @@ source "$ROOT/yolo_ros2_ws/install/setup.bash" 2>/dev/null
 export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
 
 # 清掉上次运行留下的所有残留进程
-echo "正在清理旧进程..."
+echo "Очистка..."
 for pat in '[g]z sim' '[p]arameter_bridge' '[r]viz2' '[d]epth_probe' \
            '[s]tatic_transform_publisher' '[k]eyboard_joint_controller' \
            '[o]bstacle_avoider' '[y]olo_ros2' '[v]lm_camera_rotator' \
@@ -29,11 +29,11 @@ done
 
 # 基本检查
 if ! command -v ros2 >/dev/null 2>&1; then
-    echo "✗ 找不到 ros2, 请确认 ROS 2 Jazzy 已安装"
+    echo "✗ Нет ros2 (ROS 2 Jazzy)"
     exit 1
 fi
 if [ ! -f "$ROOT/worlds/robot_with_camera.sdf" ]; then
-    echo "✗ 找不到 $ROOT/worlds/robot_with_camera.sdf"
+    echo "✗ Нет $ROOT/worlds/robot_with_camera.sdf"
     exit 1
 fi
 # obstacle_avoider: 没编译过 或 源码比 install 新 -> 自动编译
@@ -42,57 +42,57 @@ pkg_install_dir() {
     ls -d "$ROOT/obstacle_ws/install/obstacle_avoider/lib/python3"*/site-packages/obstacle_avoider 2>/dev/null | head -1
 }
 build_pkg() {
-    echo "编译 obstacle_avoider ..."
+    echo "Сборка obstacle_avoider..."
     if (cd "$ROOT/obstacle_ws" && colcon build --packages-select obstacle_avoider) \
             > /tmp/all_sh_build.log 2>&1; then
-        echo "✓ 编译完成"
+        echo "✓ Собрано"
         source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
     else
-        echo "✗ 编译失败, 最后 20 行日志:"
+        echo "✗ Ошибка сборки, лог (20):"
         tail -20 /tmp/all_sh_build.log
         exit 1
     fi
 }
 PKG_INST=$(pkg_install_dir)
 if [ -z "$PKG_INST" ]; then
-    echo "obstacle_ws 还没编译过, 自动编译..."
+    echo "obstacle_ws не собран, собираю..."
     build_pkg
     PKG_INST=$(pkg_install_dir)
 elif [ -n "$(find "$PKG_SRC" -name '*.py' -newer "$PKG_INST" -print -quit 2>/dev/null)" ]; then
-    echo "检测到源码比已安装的版本新, 自动重编译..."
+    echo "Исходники новее, пересобираю..."
     build_pkg
 fi
-echo "✓ 环境就绪, 残留已清理"
+echo "✓ Готово, остатки очищены"
 echo ""
 
 # ---- 依次启动四路 ----
-echo "[1/4] 仿真 + 键盘 + 话题桥..."
+echo "[1/4] Симуляция + клавиатура + мосты..."
 bash "$ROOT/start_simulation.sh" &
 SIM_PID=$!
 
-echo "[2/4] YOLO 检测..."
+echo "[2/4] YOLO..."
 bash "$ROOT/yolo.sh" &
 YOLO_PID=$!
 
-echo "[3/4] RViz2 (相机图 + 轨迹)..."
+echo "[3/4] RViz2 (камера + траектория)..."
 bash "$ROOT/view_camera.sh" &
 VIEW_PID=$!
 
-echo "[4/4] 位置感知 (机器人/相机位姿 + TF)..."
+echo "[4/4] Позиционирование (робот/камера + TF)..."
 python3 "$ROOT/nodes/robot_pose_monitor.py" > /tmp/pose_monitor.log 2>&1 &
 POSE_PID=$!
 if kill -0 $POSE_PID 2>/dev/null; then
-    echo "✓ 位置感知已启动: /robot_pose /camera_pose /odom /robot_path + TF"
-    echo "  轨迹就在上面那个 RViz2 窗口里: Path(/robot_path) 已开, Fixed Frame=odom"
-    echo "  机器人头顶会跟着显示坐标文字: x / y / yaw  (/robot_label)"
+    echo "✓ Позиционирование: /robot_pose /camera_pose /odom /robot_path + TF"
+    echo "  Траектория - в RViz2: Path(/robot_path), Fixed Frame=odom"
+    echo "  Над роботом: x / y / yaw (/robot_label)"
 else
-    echo "⚠️  位置感知启动失败, 最后 5 行日志:"
+    echo "⚠️  Позиционирование не стартовало, лог (5):"
     tail -5 /tmp/pose_monitor.log
 fi
 
 cleanup() {
     echo ""
-    echo "收尾: 停止所有子进程..."
+    echo "Стоп: дочерние процессы..."
     kill $SIM_PID $YOLO_PID $VIEW_PID $POSE_PID 2>/dev/null
     for _ in 1 2; do
         for pat in '[d]epth_probe' '[s]tatic_transform_publisher' '[r]viz2' \

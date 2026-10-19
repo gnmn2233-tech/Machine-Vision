@@ -8,7 +8,7 @@ WORKSPACE_DIR="$ROOT/yolo_ros2_ws"
 
 # 检查目录是否存在
 if [ ! -d "$WORKSPACE_DIR" ]; then
-    echo "✗ 错误：工作空间目录 $WORKSPACE_DIR 不存在！"
+    echo "✗ Нет каталога $WORKSPACE_DIR!"
     exit 1
 fi
 
@@ -22,7 +22,7 @@ echo "Activating virtual environment..."
 if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 else
-    echo "✗ 错误：虚拟环境未找到 (.venv)"
+    echo "✗ Нет окружения (.venv)"
     exit 1
 fi
 
@@ -43,8 +43,8 @@ export PYTHONPATH="$WORKSPACE_DIR/.venv/lib/python3.12/site-packages:$PYTHONPATH
 CAMERA_TOPIC="/camera"
 
 echo "========================================="
-echo "  启动 YOLO 节点..."
-echo "  话题: $CAMERA_TOPIC"
+echo "  YOLO..."
+echo "  Топик: $CAMERA_TOPIC"
 echo "========================================="
 
 # 启动命令

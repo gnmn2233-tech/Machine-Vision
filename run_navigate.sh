@@ -23,11 +23,11 @@ source /opt/ros/jazzy/setup.bash
 export GZ_SIM_RESOURCE_PATH="$ROOT/mod:${GZ_SIM_RESOURCE_PATH:-}"
 
 if ! pgrep -f "gz sim" >/dev/null 2>&1; then
-    echo "✗ 没检测到 Gazebo 仿真进程。请先另开终端运行: bash start_simulation.sh"
+    echo "✗ Gazebo не запущен. В другом терминале: bash start_simulation.sh"
     exit 1
 fi
 if ! pgrep -f "ros_gz_bridge" >/dev/null 2>&1; then
-    echo "✗ 没检测到 ros_gz_bridge。请先另开终端运行: bash start_simulation.sh"
+    echo "✗ Нет ros_gz_bridge. В другом терминале: bash start_simulation.sh"
     exit 1
 fi
 

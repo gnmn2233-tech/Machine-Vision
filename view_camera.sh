@@ -12,12 +12,12 @@ source /opt/ros/jazzy/setup.bash
 source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
 
 echo "========================================="
-echo "  相机图像查看 - 使用 RViz2"
+echo "  Камера - RViz2"
 echo "========================================="
 
 # 检查 rviz2 包是否已安装
 if ! ros2 pkg list | grep -q rviz2; then
-    echo "✗ RViz2 未安装，请先执行："
+    echo "✗ RViz2 не установлен, выполните:"
     echo "  sudo apt install ros-jazzy-rviz2"
     exit 1
 fi
@@ -46,7 +46,7 @@ ros2 run obstacle_avoider depth_probe --publish --quiet &
 DEPTH_PUB_PID=$!
 
 if ! kill -0 $DEPTH_PUB_PID 2>/dev/null; then
-    echo "⚠️  深度彩色图发布器没能起来, 先编译再重跑:"
+    echo "⚠️  Публикатор глубины не стартовал, соберите и повторите:"
     echo "    cd "$ROOT/obstacle_ws" && colcon build --packages-select obstacle_avoider"
 else
     GRAPH=$(timeout 20 python3 - <<'PY' 2>/dev/null
@@ -64,14 +64,14 @@ rclpy.shutdown()
 PY
 )
     if echo "$GRAPH" | grep -q 'COLORIZED=1'; then
-        echo "✓ 深度彩色图已在发布: /depth_camera/colorized"
+        echo "✓ Глубина публикуется: /depth_camera/colorized"
     else
-        echo "⚠️  发布器进程在, 但图上没等到 /depth_camera/colorized (等了 8 秒)"
-        echo "    先重跑一次 all.sh; 还不行就在 RViz2 里手动找它(Add 对话框关掉重开)"
+        echo "⚠️  Публикатор жив, топика /depth_camera/colorized нет (8 с)"
+        echo "    Перезапустите all.sh; иначе ищите топик вручную в RViz2 (переоткройте Add)"
     fi
     if ! echo "$GRAPH" | grep -q 'DEPTH=1'; then
-        echo "⚠️  也没等到 /depth_camera 原始话题 —— 深度桥没起来, 彩色图会没画面"
-        echo "    排查: 重跑 bash start_simulation.sh, 确认 4 个桥都启动"
+        echo "⚠️  /depth_camera тоже нет - мост глубины не поднялся, карта пустая"
+        echo "    Проверка: bash start_simulation.sh, все 4 моста должны быть запущены"
     fi
 fi
 
