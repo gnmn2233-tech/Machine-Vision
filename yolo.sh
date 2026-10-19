@@ -47,6 +47,7 @@ echo "  话题: $CAMERA_TOPIC"
 echo "========================================="
 
 # 启动命令
-# 注意：这里使用了绝对路径指向 launch 文件
-ros2 launch /root/gz_ros/yolo_ros2_ws/src/yolo_ros/yolo_bringup/launch/yolov8.launch.py \
+# 用"包名 + launch 文件名"而不是绝对路径: 上面已经 source install/setup.bash,
+# 这样仓库放在任何目录都能跑 (原来写死 /root/gz_ros/... 只有 /root 下的机器能用)
+ros2 launch yolo_bringup yolov8.launch.py \
   input_image_topic:=$CAMERA_TOPIC
