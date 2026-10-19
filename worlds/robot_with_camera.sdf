@@ -1,3 +1,8 @@
+<!-- 注: Gazebo 窗口的初始视角不在本文件里 -- gui/camera 在 SDF 规范中不支持 pose,
+     只有 view_controller/track_visual。视角存在 ~/.gz/sim/8/gui.config 的
+     <camera_pose>0 -9 6 0 0.59 1.5708</camera_pose>: 相机站在 -Y 侧抬高 6 m 朝 +Y 看,
+     于是屏幕右 = +X、屏幕往里 = +Y。默认值 -6 0 6 0 0.5 0 是站在 -X 侧朝 +X 看,
+     屏幕右变成 -Y, 目标 (1,1) 在画面上会显示成"往左上走"。 -->
 <sdf version='1.10'>
   <world name='default'>
     <scene>
@@ -307,6 +312,9 @@
       <plugin name='gz::sim::systems::JointPositionController' filename='gz-sim-joint-position-controller-system'>
         <joint_name>base_yaw_joint</joint_name>
         <topic>camera_joint_controller/commands</topic>
+        <!-- 开机就转到 +Y: 相机视角(gui.config)正对 +Y, 车头与之对齐.
+             该初值同时经 joint_state 上报, 所以 odom 的 yaw 也是 90 度, 视觉与数值不打架. -->
+        <initial_position>1.5708</initial_position>
         <p_gain>15.0</p_gain>
         <i_gain>0.0</i_gain>
         <d_gain>20.0</d_gain>
@@ -342,12 +350,16 @@
     <include>
       <uri>model://prius hybrid</uri>
       <name>prius_hybrid</name>
-      <pose>4.7399296760558949 4.5714282989495638 0.01264973599772235 -3.3808915731029282e-08 2.3397734559909374e-12 8.9350098963611641e-08</pose>
+      <!-- 2026-10-20 场景整体绕 Z 顺时针 90 度: 原来 +X 是"前", 现在让 +Y 当"前",
+           这样相机站在 -Y 侧正对 +Y 时, 车和人仍落在画面正前方。
+           旧位姿 = (4.74, 4.57, yaw 0); 映射 (x,y,yaw) -> (-y, x, yaw+90deg) -->
+      <pose>-4.5714282989495638 4.7399296760558949 0.01264973599772235 -3.3808915731029282e-08 2.3397734559909374e-12 1.5707963267948966</pose>
     </include>
     <include>
       <uri>model://walking person</uri>
       <name>person_walking</name>
-      <pose>4.6140275001525879 -0.0059126601554453373 0.099999227882671946 0 0 0</pose>
+      <!-- 同上, 由 (4.61, 0) 旋到 (0, 4.61): 正好立在 +Y 轴上, 落在画面正中 -->
+      <pose>0.0059126601554453373 4.6140275001525879 0.099999227882671946 0 0 1.5707963267948966</pose>
     </include>
     <light name='sun' type='directional'>
       <pose>0 0 10 0 0 0</pose>
