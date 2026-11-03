@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 加载 ROS 2 Jazzy 环境 (脚本自己 source, 不依赖外部)
 source /opt/ros/jazzy/setup.bash
 
-export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
+export GZ_SIM_RESOURCE_PATH="$ROOT/worlds/robots:$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
 
 echo "Очистка..."
 pkill -9 -f "gz sim" 2>/dev/null
@@ -23,7 +23,14 @@ pkill -9 -f "obstacle_avoider" 2>/dev/null
 pkill -9 -f "yolo_ros2" 2>/dev/null
 
 echo "Запуск Gazebo..."
-gz sim -r "$ROOT/worlds/robot_with_camera.sdf" &
+WORLD_FILE="${WORLD_FILE:-$ROOT/worlds/scenes/person.sdf}"
+if [ ! -f "$WORLD_FILE" ]; then
+    echo "✗ Нет файла сцены: $WORLD_FILE"
+    echo "  Доступные: $(ls "$ROOT/worlds/scenes"/*.sdf 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
+    exit 1
+fi
+echo "✓ Сцена: $WORLD_FILE"
+gz sim -r "$WORLD_FILE" &
 GAZEBO_PID=$!
 
 if ! kill -0 $GAZEBO_PID 2>/dev/null; then
@@ -57,6 +64,12 @@ ros2 run ros_gz_bridge parameter_bridge \
 ros2 run ros_gz_bridge parameter_bridge \
   '/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo' \
   --ros-args -r __node:=bridge_depth_info -r '/camera_info:=/depth_camera/camera_info' &
+
+# 2D 激光雷达: 360 度单线, 与深度相机互补. 深度相机只有 60 度视场,
+# 雷达同一时刻就能看全一圈, 避障的空档判断靠它.
+ros2 run ros_gz_bridge parameter_bridge \
+  '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan' \
+  --ros-args -r __node:=bridge_scan &
 
 # 深度点云（可选：约 30 万点/帧，需要做三维重建时再取消注释）
 # ros2 run ros_gz_bridge parameter_bridge \

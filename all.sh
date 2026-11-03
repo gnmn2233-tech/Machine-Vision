@@ -20,12 +20,15 @@ export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$GZ_SIM_RESOURCE_PATH"
 
 # 清掉上次运行留下的所有残留进程
 echo "Очистка..."
-for pat in '[g]z sim' '[p]arameter_bridge' '[r]viz2' '[d]epth_probe' \
+for pat in '[g]z sim' '[g]z-[s]erver' '[g]zclient' '[r]uby.*gz.sim' \
+           '[p]arameter_bridge' '[r]viz2' '[d]epth_probe' \
            '[s]tatic_transform_publisher' '[k]eyboard_joint_controller' \
            '[o]bstacle_avoider' '[y]olo_ros2' '[v]lm_camera_rotator' \
            '[r]obot_pose_monitor'; do
     pkill -9 -f "$pat" 2>/dev/null
 done
+# gz 的旧会话日志/锁(不动 gui.config 等用户配置)
+rm -f /tmp/gz-sim-*.log /tmp/gz-*.lock 2>/dev/null
 
 # 基本检查
 if ! command -v ros2 >/dev/null 2>&1; then
@@ -63,6 +66,44 @@ elif [ -n "$(find "$PKG_SRC" -name '*.py' -newer "$PKG_INST" -print -quit 2>/dev
     build_pkg
 fi
 echo "✓ Готово, остатки очищены"
+
+# 显示检查: Gazebo/RViz 需要可用的 X server; WSLg 未运行时 Qt 直接 abort, 用户看不到任何窗口
+display_ok() {
+    [ -n "$DISPLAY" ] || return 1
+    command -v xdpyinfo >/dev/null 2>&1 || return 0
+    xdpyinfo -display "$DISPLAY" >/dev/null 2>&1
+}
+if display_ok; then
+    echo "✓ Дисплей: $DISPLAY"
+else
+    echo "⚠️  Дисплей недоступен (DISPLAY=$DISPLAY) — окна Gazebo и RViz не откроются."
+    echo "    Симуляция пойдёт без окон. Исправление: в PowerShell выполните"
+    echo "    'wsl --shutdown', подождите 10 с и откройте WSL заново."
+fi
+echo ""
+
+# ---- 选择仿真场景 ----
+SCENES_DIR="$ROOT/worlds/scenes"
+SCENE_LIST=$(ls "$SCENES_DIR"/*.sdf 2>/dev/null | xargs -r -n1 basename | sed 's/\.sdf$//')
+if [ -n "$SCENE" ] && [ -f "$SCENES_DIR/$SCENE.sdf" ]; then
+    export WORLD_FILE="$SCENES_DIR/$SCENE.sdf"
+elif [ -t 0 ] && [ -n "$SCENE_LIST" ]; then
+    echo "Доступные сцены (worlds/scenes):"
+    i=1
+    for s in $SCENE_LIST; do printf "  %d) %s\n" "$i" "$s"; i=$((i+1)); done
+    printf "Выберите сцену (номер или имя, Enter = person): "
+    read -r pick
+    pick="${pick:-person}"
+    if [ -f "$SCENES_DIR/$pick.sdf" ]; then
+        export WORLD_FILE="$SCENES_DIR/$pick.sdf"
+    else
+        sel=$(echo "$SCENE_LIST" | sed -n "${pick}p")
+        export WORLD_FILE="$SCENES_DIR/${sel:-person}.sdf"
+    fi
+else
+    export WORLD_FILE="$SCENES_DIR/person.sdf"
+fi
+echo "Сцена: $(basename "$WORLD_FILE" .sdf)"
 echo ""
 
 # ---- 依次启动四路 ----

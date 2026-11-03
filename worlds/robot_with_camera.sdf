@@ -1,8 +1,3 @@
-<!-- 注: Gazebo 窗口的初始视角不在本文件里 -- gui/camera 在 SDF 规范中不支持 pose,
-     只有 view_controller/track_visual。视角存在 ~/.gz/sim/8/gui.config 的
-     <camera_pose>0 -9 6 0 0.59 1.5708</camera_pose>: 相机站在 -Y 侧抬高 6 m 朝 +Y 看,
-     于是屏幕右 = +X、屏幕往里 = +Y。默认值 -6 0 6 0 0.5 0 是站在 -X 侧朝 +X 看,
-     屏幕右变成 -Y, 目标 (1,1) 在画面上会显示成"往左上走"。 -->
 <sdf version='1.10'>
   <world name='default'>
     <scene>
@@ -25,7 +20,7 @@
         <visual name='visual'>
           <geometry>
             <box>
-              <size>20 20 0.10000000000000001</size>
+              <size>22 22 0.10000000000000001</size>
             </box>
           </geometry>
           <material>
@@ -36,7 +31,7 @@
         <collision name='collision'>
           <geometry>
             <box>
-              <size>20 20 0.10000000000000001</size>
+              <size>22 22 0.10000000000000001</size>
             </box>
           </geometry>
           <surface>
@@ -65,17 +60,21 @@
       <self_collide>false</self_collide>
     </model>
     <model name='robot_with_camera'>
-      <!-- 平移底盘: x 关节(连世界) → chassis_x → y 关节 → chassis_y -->
-      <!-- 转向关节 base_yaw_joint 挂在 chassis_y 上, 使前进/后退可沿任意朝向 -->
       <link name='chassis_x'>
         <inertial>
           <mass>0.001</mass>
           <inertia>
-            <ixx>1e-06</ixx><iyy>1e-06</iyy><izz>1e-06</izz>
-            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+            <ixx>9.9999999999999995e-07</ixx>
+            <iyy>9.9999999999999995e-07</iyy>
+            <izz>9.9999999999999995e-07</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
           </inertia>
           <pose>0 0 0 0 0 0</pose>
         </inertial>
+        <pose>0 0 0 0 0 0</pose>
+        <enable_wind>false</enable_wind>
       </link>
       <joint name='drive_x_joint' type='prismatic'>
         <parent>world</parent>
@@ -83,24 +82,37 @@
         <axis>
           <xyz>1 0 0</xyz>
           <limit>
-            <lower>-9</lower>
-            <upper>9</upper>
+            <lower>-10</lower>
+            <upper>10</upper>
+            <effort>inf</effort>
+            <velocity>inf</velocity>
+            <stiffness>100000000</stiffness>
+            <dissipation>1</dissipation>
           </limit>
           <dynamics>
-            <damping>1.0</damping>
+            <spring_reference>0</spring_reference>
+            <spring_stiffness>0</spring_stiffness>
+            <damping>1</damping>
             <friction>0</friction>
           </dynamics>
         </axis>
+        <pose>0 0 0 0 0 0</pose>
       </joint>
       <link name='chassis_y'>
         <inertial>
           <mass>0.001</mass>
           <inertia>
-            <ixx>1e-06</ixx><iyy>1e-06</iyy><izz>1e-06</izz>
-            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+            <ixx>9.9999999999999995e-07</ixx>
+            <iyy>9.9999999999999995e-07</iyy>
+            <izz>9.9999999999999995e-07</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
           </inertia>
           <pose>0 0 0 0 0 0</pose>
         </inertial>
+        <pose>0 0 0 0 0 0</pose>
+        <enable_wind>false</enable_wind>
       </link>
       <joint name='drive_y_joint' type='prismatic'>
         <parent>chassis_x</parent>
@@ -108,17 +120,57 @@
         <axis>
           <xyz>0 1 0</xyz>
           <limit>
-            <lower>-9</lower>
-            <upper>9</upper>
+            <lower>-10</lower>
+            <upper>10</upper>
+            <effort>inf</effort>
+            <velocity>inf</velocity>
+            <stiffness>100000000</stiffness>
+            <dissipation>1</dissipation>
           </limit>
           <dynamics>
-            <damping>1.0</damping>
+            <spring_reference>0</spring_reference>
+            <spring_stiffness>0</spring_stiffness>
+            <damping>1</damping>
             <friction>0</friction>
           </dynamics>
         </axis>
+        <pose>0 0 0 0 0 0</pose>
       </joint>
       <link name='base'>
-        <pose>0 0 0.074999999999999997 0 0 0</pose>
+        <sensor name='lidar' type='gpu_lidar'>
+          <pose>0 0 0.16 0 0 -1.5707963267948966</pose>
+          <topic>/scan</topic>
+          <update_rate>10</update_rate>
+          <enable_metrics>false</enable_metrics>
+          <lidar>
+            <scan>
+              <horizontal>
+                <samples>450</samples>
+                <resolution>1</resolution>
+                <min_angle>-3.14159265358979</min_angle>
+                <max_angle>3.14159265358979</max_angle>
+              </horizontal>
+              <vertical>
+                <samples>1</samples>
+                <min_angle>0</min_angle>
+                <max_angle>0</max_angle>
+                <resolution>1</resolution>
+              </vertical>
+            </scan>
+            <range>
+              <min>0.10000000000000001</min>
+              <max>12</max>
+              <resolution>0.01</resolution>
+            </range>
+            <noise>
+              <type>none</type>
+              <mean>0</mean>
+              <stddev>0</stddev>
+            </noise>
+            <visibility_mask>4294967295</visibility_mask>
+          </lidar>
+        </sensor>
+        <pose>0 0 0.074999999999999997 0 0 1.57079732294175</pose>
         <inertial>
           <mass>0.5</mass>
           <inertia>
@@ -163,7 +215,17 @@
         <child>base</child>
         <axis>
           <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-inf</lower>
+            <upper>inf</upper>
+            <effort>inf</effort>
+            <velocity>inf</velocity>
+            <stiffness>100000000</stiffness>
+            <dissipation>1</dissipation>
+          </limit>
           <dynamics>
+            <spring_reference>0</spring_reference>
+            <spring_stiffness>0</spring_stiffness>
             <damping>5</damping>
             <friction>0</friction>
           </dynamics>
@@ -236,7 +298,6 @@
               <format>RGB_INT8</format>
               <anti_aliasing>4</anti_aliasing>
             </image>
-            <!-- RGB 内参让位到 /camera/camera_info: 深度相机的内参固定发在 /camera_info, 避免抢同一话题 -->
             <camera_info_topic>/camera/camera_info</camera_info_topic>
             <trigger_topic></trigger_topic>
             <triggered>false</triggered>
@@ -270,9 +331,6 @@
             <optical_frame_id></optical_frame_id>
           </camera>
         </sensor>
-        <!-- 深度相机: 与 RGB 同位置/同视场, 画面与 /camera 像素对齐; R_FLOAT32 单位米, 未命中为 inf。
-             话题 /depth_camera(深度图) 与 /depth_camera/points(点云, 默认不桥接); 避障节点据此
-             算 左/中/右 三区最近距离并发布 /nearest_obstacle -->
         <sensor name='depth_camera' type='depth_camera'>
           <pose>0.10000000000000001 0 0.28000000000000003 0 0 0</pose>
           <topic>/depth_camera</topic>
@@ -285,20 +343,46 @@
               <width>640</width>
               <height>480</height>
               <format>R_FLOAT32</format>
+              <anti_aliasing>4</anti_aliasing>
             </image>
-            <!-- Harmonic 的 depth_camera 不解析 camera_info_topic, 内参固定发 /camera_info, 桥接时 remap 改名 -->
+            <camera_info_topic>__default__</camera_info_topic>
+            <trigger_topic></trigger_topic>
+            <triggered>false</triggered>
             <clip>
               <near>0.10000000000000001</near>
               <far>20</far>
             </clip>
+            <depth_camera>
+              <output>depths</output>
+              <clip>
+                <near>0.10000000000000001</near>
+                <far>10</far>
+              </clip>
+            </depth_camera>
+            <save enabled='false'>
+              <path>__default__</path>
+            </save>
+            <visibility_mask>4294967295</visibility_mask>
             <noise>
               <type>none</type>
               <mean>0</mean>
               <stddev>0</stddev>
             </noise>
-            <depth_camera>
-              <output>depths</output>
-            </depth_camera>
+            <distortion>
+              <k1>0</k1>
+              <k2>0</k2>
+              <k3>0</k3>
+              <p1>0</p1>
+              <p2>0</p2>
+              <center>0.5 0.5</center>
+            </distortion>
+            <lens>
+              <type>stereographic</type>
+              <scale_to_hfov>true</scale_to_hfov>
+              <cutoff_angle>1.5707963267948966</cutoff_angle>
+              <env_texture_size>256</env_texture_size>
+            </lens>
+            <optical_frame_id></optical_frame_id>
           </camera>
         </sensor>
         <pose>0 0 0 0 0 0</pose>
@@ -312,8 +396,6 @@
       <plugin name='gz::sim::systems::JointPositionController' filename='gz-sim-joint-position-controller-system'>
         <joint_name>base_yaw_joint</joint_name>
         <topic>camera_joint_controller/commands</topic>
-        <!-- 开机就转到 +Y: 相机视角(gui.config)正对 +Y, 车头与之对齐.
-             该初值同时经 joint_state 上报, 所以 odom 的 yaw 也是 90 度, 视觉与数值不打架. -->
         <initial_position>1.5708</initial_position>
         <p_gain>15.0</p_gain>
         <i_gain>0.0</i_gain>
@@ -321,7 +403,6 @@
       </plugin>
       <plugin name='gz::sim::systems::JointStatePublisher' filename='gz-sim-joint-state-publisher-system'>
         <topic>joint_state</topic>
-        <!-- 位置感知需要 drive_x/drive_y 才能解出 x/y (只发 base_yaw 时只能知道朝向) -->
         <joint_name>drive_x_joint</joint_name>
         <joint_name>drive_y_joint</joint_name>
         <joint_name>base_yaw_joint</joint_name>
@@ -345,21 +426,20 @@
       <static>false</static>
       <self_collide>false</self_collide>
     </model>
-    <!-- 用 model:// 而不是写死绝对路径: Gazebo 通过 GZ_SIM_RESOURCE_PATH 找模型,
-         这样任何人 clone 到任意目录都能加载 (start_simulation.sh 已把 mod/ 加进该变量) -->
     <include>
-      <uri>model://prius hybrid</uri>
+      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
       <name>prius_hybrid</name>
-      <!-- 2026-10-20 场景整体绕 Z 顺时针 90 度: 原来 +X 是"前", 现在让 +Y 当"前",
-           这样相机站在 -Y 侧正对 +Y 时, 车和人仍落在画面正前方。
-           旧位姿 = (4.74, 4.57, yaw 0); 映射 (x,y,yaw) -> (-y, x, yaw+90deg) -->
-      <pose>-4.5714282989495638 4.7399296760558949 0.01264973599772235 -3.3808915731029282e-08 2.3397734559909374e-12 1.5707963267948966</pose>
+      <pose>-4.571428298949253 4.7399296760558824 0.012649738109208861 -3.3783754486876425e-08 2.3402624556218585e-12 1.5707963267948932</pose>
     </include>
     <include>
-      <uri>model://walking person</uri>
+      <uri>file:///root/gz_ros/mod/walking person</uri>
       <name>person_walking</name>
-      <!-- 同上, 由 (4.61, 0) 旋到 (0, 4.61): 正好立在 +Y 轴上, 落在画面正中 -->
-      <pose>0.0059126601554453373 4.6140275001525879 0.099999227882671946 0 0 1.5707963267948966</pose>
+      <pose>0.0059126601554453373 4.6140275001525879 0.099999235505769002 0 0 1.5707963267948963</pose>
+    </include>
+    <include>
+      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
+      <name>prius_hybrid_0</name>
+      <pose>3.2301868175652202 4.2403415756279843 0.012649851850239396 -3.3860017763917921e-08 2.3385838203889359e-12 8.9350110937866237e-08</pose>
     </include>
     <light name='sun' type='directional'>
       <pose>0 0 10 0 0 0</pose>

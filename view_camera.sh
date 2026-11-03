@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 source /opt/ros/jazzy/setup.bash
 source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
+source "$ROOT/yolo_ros2_ws/install/setup.bash" 2>/dev/null   # depth_probe 要 import yolo_msgs
 
 echo "========================================="
 echo "  Камера - RViz2"

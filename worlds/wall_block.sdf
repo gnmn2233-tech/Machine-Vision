@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="wall_block">
+    <static>true</static>
+    <link name="link">
+      <collision name="c"><geometry><box><size>1.2 0.4 0.6</size></box></geometry></collision>
+      <visual name="v">
+        <geometry><box><size>1.2 0.4 0.6</size></box></geometry>
+        <material><ambient>0.7 0.2 0.2 1</ambient><diffuse>0.8 0.2 0.2 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

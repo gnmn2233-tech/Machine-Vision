@@ -1,17 +1,21 @@
-# Machine-Vision — 带深度相机的视觉导航机器人仿真
+# Machine-Vision — 带 360° 雷达与深度相机的视觉导航机器人仿真
 
 基于 **ROS 2 Jazzy + Gazebo Harmonic + YOLO + 大模型（VLM/LLM）** 的机器人视觉仿真项目：
-机器人在 Gazebo 世界里通过机载相机观察环境，YOLO 做实时目标检测，避障节点用深度相机测距并给出
-左/中/右三区最近距离，支持键盘控制与大模型兜底决策；本仓库另含**机器人/相机位置感知**。
+机器人在 Gazebo 世界里通过机载相机观察环境，YOLO 做实时目标检测；导航节点用一台 **360° 单线雷达**做
+几何避障（36 个 10° 扇区，能穿 0.70 m 窄缝），深度相机退回辅助，大模型只在几何拿不准时兜底；
+支持键盘控制，本仓库另含**机器人/相机位置感知**。
 
 ## 功能特性
 
-- **带相机机器人模型**：`robot_with_camera.sdf` —— RGB 相机 + 深度相机（与 RGB 同位置、同视场，像素对齐）。
+- **带相机机器人模型**：`robot_with_camera.sdf` —— RGB 相机 + 深度相机（与 RGB 同位置、同视场，像素对齐）+ 360° 单线雷达（装机身 z≈0.24 m，每帧 0.8° 一条射线）。
 - **键盘控制**：`keyboard_joint_controller.py` 控制相机旋转与底盘平移；**空闲时完全不发布指令**，
   并用 `/avoider_override` 与避障节点协作（按键期间自动接管、松开交还）。
 - **实时目标检测**：`yolo.sh` 启动 YOLO，订阅 `/camera`，发布 `/yolo/detections`。
-- **规则优先避障 + 大模型兜底**：`obstacle_avoider` 用深度图算左/中/右三区最近距离，发布
-  `/nearest_obstacle`、`/obstacle_zones`；模糊场景调用 LLM（本地 LM Studio 优先、云端兜底，失败回落纯规则）。
+- **几何优先避障 + 大模型兜底**：导航内嵌的 `avoid_planner`（VFH 简化版）读 `/scan` 的 36 个扇区，
+  每周期只回答两件事——车头指向哪、能不能往前挪（底盘只能原地转向 + 沿车头直行，没有横移也没有倒车）。
+  窄缝由 `_narrow()` 直接量原始射线（两侧同时有障、缝宽 0.52–1.15 m、缝中线两侧 0.24 m 内干净 → 可穿），
+  实测能穿过 0.70 m 通道。几何拿不准时（flap / tie / stall）才问 LLM，它只回 LEFT / RIGHT / STRAIGHT。
+  旧的 `obstacle_avoider`（深度图算左/中/右三区，发布 `/nearest_obstacle`、`/obstacle_zones`）仍然保留，供 `run.sh avoid` 使用。
 - **深度彩色图**：避障包内的 `depth_probe` 把深度图转成伪彩色 `/depth_camera/colorized`。
 - **VLM 相机旋转**：`vlm_navigator` 让大模型看图后决定相机转动方向。
 - **机器人/相机位置感知**（`robot_pose_monitor.py`，本仓库新增）：由 `/joint_states` 真值关节角解算
@@ -37,8 +41,8 @@ Machine-Vision/
 ├── all.sh                            # 一键：清理残留 + 自动编译避障包 + 依次起 仿真/YOLO/RViz
 ├── start_simulation.sh               # 仿真 + 键盘 + 全部话题桥
 ├── yolo.sh                           # 启动 YOLO 检测
-├── run_obstacle_avoider.sh           # 启动避障节点（含 LLM failover 配置 + 桥保活）
-├── run_navigate.sh                   # 一键启动导航（可带坐标参数）
+├── run.sh                            # 统一启动：默认导航+内嵌避障；run.sh avoid = 旧避障节点
+├── stop.sh                           # 一键关掉仿真+桥+节点（没窗口/卡死时用）
 ├── view_camera.sh                    # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
 ├── nodes/                            # 本仓库写的 ROS 节点
 │   ├── keyboard_joint_controller.py  # 键盘控制（空闲静默，与避障协作）
@@ -98,7 +102,7 @@ bash all.sh        # 一键：仿真 + YOLO + RViz（会先自动编译避障包
 ```bash
 bash start_simulation.sh        # 终端1：仿真 + 键盘 + 全部话题桥
 bash yolo.sh                    # 终端2：YOLO 检测
-bash run_obstacle_avoider.sh    # 终端3：避障（可选）
+bash run.sh avoid               # 终端3：独立避障节点（可选，与导航互斥）
 bash view_camera.sh             # 终端4：RViz + 深度彩色图（可选）
 ```
 
@@ -240,7 +244,7 @@ ros2 run tf2_tools view_frames  # 生成 TF 树 PDF
 
 ```bash
 bash start_simulation.sh     # 终端1：仿真 + 话题桥（bash all.sh 也可以）
-bash run_navigate.sh         # 终端2：不带参数 = 交互模式
+bash run.sh                  # 终端2：不带参数 = 交互模式
 ```
 
 终端2 会先打印当前位置和用法，然后停在 `坐标 >` 提示符等你输入：
@@ -273,10 +277,10 @@ bash run_navigate.sh         # 终端2：不带参数 = 交互模式
 也可以在命令行一次给全：
 
 ```bash
-bash run_navigate.sh 2.0 -1.5              # 走到 (2, -1.5)，朝向不变
-bash run_navigate.sh 2.0 -1.5 --yaw 90     # 走到 (2, -1.5) 并转到 90 度
-bash run_navigate.sh 1 0 2 1 0 0           # 多航点：(1,0) → (2,1) → (0,0)
-bash run_navigate.sh -p v_max:=0.8 3 -3    # 改最大速度 (m/s)
+bash run.sh 2.0 -1.5              # 走到 (2, -1.5)，朝向不变
+bash run.sh 2.0 -1.5 --yaw 90     # 走到 (2, -1.5) 并转到 90 度
+bash run.sh 1 0 2 1 0 0           # 多航点：(1,0) → (2,1) → (0,0)
+bash run.sh -p v_max:=0.8 3 -3    # 改最大速度 (m/s)
 ```
 
 ### 也可以用话题 / RViz
@@ -320,7 +324,7 @@ ros2 topic echo /nav_goal_reached --once
 | `turn_gain` | 2.0 | 前进时朝向修正的 P 增益 |
 | `use_orientation` | false | 让 `/goal_pose` 里的四元数当作目标朝向 |
 
-改法：`bash run_navigate.sh -p v_max:=0.8 3 -3`（`-p` 会转成 ROS 参数传给节点）。
+改法：`bash run.sh -p v_max:=0.8 3 -3`（`-p` 会转成 ROS 参数传给节点）。
 
 ### 安全保护（实测过的四种）
 
@@ -353,6 +357,8 @@ ros2 topic echo /nav_goal_reached --once
 | 话题 | 类型 | 说明 |
 |------|------|------|
 | `/camera` | `sensor_msgs/Image` | RGB 图像 |
+| `/scan` | `sensor_msgs/LaserScan` | 360° 单线雷达，约 8 Hz，几何避障的主信号源 |
+| `/clock` | `rosgraph_msgs/Clock` | 仿真时钟（headless 起法下必须桥接，否则时间戳全废） |
 | `/camera/camera_info` | `sensor_msgs/CameraInfo` | RGB 内参 |
 | `/depth_camera` | `sensor_msgs/Image` | 深度图（32FC1，单位米，inf = 未命中） |
 | `/depth_camera/camera_info` | `sensor_msgs/CameraInfo` | 深度内参 |
