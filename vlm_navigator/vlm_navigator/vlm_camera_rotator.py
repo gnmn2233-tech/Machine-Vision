@@ -9,6 +9,17 @@ import asyncio
 import aiohttp
 import re
 import math
+import os
+
+
+# ---- 后端: 一个 9B 兼顾图文 (LM Studio, OpenAI 兼容端点) ----
+# 为什么不用 Ollama 的 llava:7b: 避让判边用的是 qwen/qwen3.5-9b, 相机旋转再挂一个 7B,
+# 两张权重同时驻显存 —— LM Studio 里 7B/9B 交替时每次都要重载, 实测两边一起超时。
+# LM Studio 的 /api/v0/models 报 qwen/qwen3.5-9b 的 type=vlm: 同一份权重既吃图也吃纯文本。
+VLM_BASE = os.environ.get('VLM_BASE_URL', 'http://127.0.0.1:1234/v1')
+VLM_KEY = os.environ.get('VLM_KEY', 'lm-studio')
+VLM_MODEL = os.environ.get('VLM_MODEL', 'qwen/qwen3.5-9b')
+VLM_MAX_SIDE = int(os.environ.get('VLM_MAX_SIDE', '640'))   # 长边超它先缩放: 9B 吃大图明显变慢
 
 
 class SmoothYaw:
@@ -100,12 +111,22 @@ class VLMCameraRotator(Node):
         self.processing = True
 
         cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        _, buffer = cv2.imencode('.jpg', cv_img)
+        h, w = cv_img.shape[:2]
+        if max(h, w) > VLM_MAX_SIDE:            # 先压长边, 否则 9B 会为一张大图耗掉整轮预算
+            s = VLM_MAX_SIDE / float(max(h, w))
+            cv_img = cv2.resize(cv_img, (max(1, int(w * s)), max(1, int(h * s))),
+                                interpolation=cv2.INTER_AREA)
+        _, buffer = cv2.imencode('.jpg', cv_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
         b64_str = base64.b64encode(buffer).decode('utf-8')
 
-        asyncio.run_coroutine_threadsafe(self.invoke_llava(b64_str), self.loop)
+        asyncio.run_coroutine_threadsafe(self.invoke_vlm(b64_str), self.loop)
 
-    async def invoke_llava(self, b64_image):
+    async def invoke_vlm(self, b64_image):
+        """问同一个 9B: 带图的 chat/completions (OpenAI 兼容)。
+
+        没有图的时候这个节点本来就不发请求, 所以「纯文本」能力交给 avoid 侧的
+        llm_hint —— 那边同一个 LM Studio、同一个 qwen/qwen3.5-9b, 只是不带 image_url。
+        """
         prompt = (
             "You are a camera rotation controller for a robot. "
             "The image shows YOLO detection boxes of objects. "
@@ -116,22 +137,44 @@ class VLMCameraRotator(Node):
             "Reply with ONLY ONE WORD: left, right, forward, or stop."
         )
         payload = {
-            "model": "llava:7b",
-            "prompt": prompt,
-            "images": [b64_image],
-            "stream": False
+            "model": VLM_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": "data:image/jpeg;base64," + b64_image}},
+                ],
+            }],
+            "max_tokens": 16,               # 只要一个词; qwen3.5 会先思考, 给多了就是白等
+            "temperature": 0,
+            "stream": False,
+            "reasoning_effort": "none",     # 不吃掉这 16 个 token 就会回空 (实测 46s -> 0.33s)
         }
+        headers = {'Content-Type': 'application/json',
+                   'Authorization': 'Bearer ' + VLM_KEY}
+        url = VLM_BASE + '/chat/completions'
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post('http://localhost:11434/api/generate', json=payload,
-                                        timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    data = await resp.json()
-                    response_text = data.get('response', '')
+                timeout = aiohttp.ClientTimeout(total=15)
+                async with session.post(url, json=payload, headers=headers,
+                                        timeout=timeout) as resp:
+                    if resp.status in (400, 422):
+                        # 不认 reasoning_effort 的网关不少, 退一级重问, 别直接放弃
+                        payload.pop('reasoning_effort', None)
+                        async with session.post(url, json=payload, headers=headers,
+                                                timeout=timeout) as resp2:
+                            data = await resp2.json()
+                    else:
+                        data = await resp.json()
+                    choices = data.get('choices') or [{}]
+                    response_text = (choices[0].get('message') or {}).get('content') or ''
                     action = self.extract_action(response_text)
-                    self.get_logger().info(f"LLaVA: '{response_text}' -> 动作: {action}")
+                    self.get_logger().info(
+                        f"VLM({VLM_MODEL}): '{response_text.strip()}' -> 动作: {action}")
                     self.publish_joint_command(action)
         except Exception as e:
-            self.get_logger().error(f"调用Ollama时出错: {e}")
+            self.get_logger().error(f"调用 LM Studio 时出错: {e}")
             self.publish_joint_command('stop')
         finally:
             self.processing = False
