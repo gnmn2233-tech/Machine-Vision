@@ -15,7 +15,7 @@
 测距逻辑与 obstacle_avoider 节点保持同一套:
   1. 相机高度固定 -> 每个像素行有确定的"地面期望深度", 比它更近的像素才算障碍(矮障碍不会被地面淹没)。
   2. 按 左(<40%) / 中(40%~60%) / 右(>60%) 三区, 各取低百分位最近距离; 无近处障碍输出 inf。
-  3. yolo.sh 在跑时订阅 /yolo/detections, 每个检测框单独算距离(框内像素中位数), 画成 "person 4.33m" 标签。
+  3. bash simulation.sh yolo 在跑时订阅 /yolo/detections, 每个检测框单独算距离(框内像素中位数), 画成 "person 4.33m" 标签。
 """
 import argparse
 import math
@@ -32,7 +32,7 @@ from yolo_msgs.msg import DetectionArray
 
 DEPTH_TOPIC = '/depth_camera'
 VIS_TOPIC = '/depth_camera/colorized'   # 彩色化深度图(8UC3 bgr8), 给人看用
-DET_TOPIC = '/yolo/detections'          # 每个检测框一个距离(需要 yolo.sh 在跑)
+DET_TOPIC = '/yolo/detections'          # 每个检测框一个距离(需要 bash simulation.sh yolo 在跑)
 DET_TIMEOUT = 2.0                       # 检测结果超过这么久没更新就不画(避免留旧框)
 # 相机光心离地高度(米); 相机位置/装配变了要同步改(与 obstacle_avoider.py 一致)。
 CAM_HEIGHT = 0.28

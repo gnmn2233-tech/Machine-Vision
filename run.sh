@@ -26,7 +26,7 @@
 # 终端里也能随时输入 stop 取消; 或用话题:
 #   ros2 topic pub --once /nav_cancel std_msgs/msg/Bool "{data: true}"
 #
-# 前提: 另一个终端已经 bash start_simulation.sh (仿真 + 话题桥)
+# 前提: 另一个终端已经 bash simulation.sh (headless 或带界面都行)
 # 不要 set -u: /opt/ros/jazzy/setup.bash 内部引用未定义变量会直接退出
 set -o pipefail
 
@@ -65,7 +65,7 @@ case "${1:-}" in
 esac
 
 if ! pgrep -f "gz sim" >/dev/null 2>&1; then
-    echo "✗ Gazebo не запущен. В другом терминале: bash start_simulation.sh"
+    echo "✗ Gazebo не запущен. В другом терминале: bash simulation.sh"
     exit 1
 fi
 

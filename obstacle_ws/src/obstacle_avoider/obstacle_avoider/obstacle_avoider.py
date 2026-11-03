@@ -465,7 +465,7 @@ class ObstacleAvoider(Node):
             self._sync_warned = True
             self.get_logger().warn(
                 '未收到 /joint_states 的 base_yaw_joint 角度, 从 0 起步; '
-                '若镜头回跳请检查 start_simulation.sh 的 joint_state 桥')
+                '若镜头回跳请检查 bash simulation.sh 的 joint_state 桥')
         act = self.rule_action
         if self.llm_action:
             act = self._validate(self.llm_action)

@@ -10,7 +10,7 @@
 - **带相机机器人模型**：`robot_with_camera.sdf` —— RGB 相机 + 深度相机（与 RGB 同位置、同视场，像素对齐）+ 360° 单线雷达（装机身 z≈0.24 m，每帧 0.8° 一条射线）。
 - **键盘控制**：`keyboard_joint_controller.py` 控制相机旋转与底盘平移；**空闲时完全不发布指令**，
   并用 `/avoider_override` 与避障节点协作（按键期间自动接管、松开交还）。
-- **实时目标检测**：`yolo.sh` 启动 YOLO，订阅 `/camera`，发布 `/yolo/detections`。
+- **实时目标检测**：`bash simulation.sh yolo` 启动 YOLO，订阅 `/camera`，发布 `/yolo/detections`。
 - **几何优先避障 + 大模型兜底**：导航内嵌的 `avoid_planner`（VFH 简化版）读 `/scan` 的 36 个扇区，
   每周期只回答两件事——车头指向哪、能不能往前挪（底盘只能原地转向 + 沿车头直行，没有横移也没有倒车）。
   窄缝由 `_narrow()` 直接量原始射线（两侧同时有障、缝宽 0.52–1.15 m、缝中线两侧 0.24 m 内干净 → 可穿），
@@ -38,12 +38,8 @@
 
 ```
 Machine-Vision/
-├── all.sh                            # 一键：清理残留 + 自动编译避障包 + 依次起 仿真/YOLO/RViz
-├── start_simulation.sh               # 仿真 + 键盘 + 全部话题桥
-├── yolo.sh                           # 启动 YOLO 检测
-├── run.sh                            # 统一入口：默认导航+内嵌避障；avoid = 旧避障节点；stop = 一键关闭
-├── _test.sh                          # 场景回归: bash _test.sh [person lowbox sym mixed]
-├── view_camera.sh                    # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
+├── simulation.sh                     # 起仿真: 无参数=带界面全栈 / headless / view / yolo / test
+├── run.sh                            # 导航入口：bash run.sh X Y；avoid = 旧避障节点；stop = 一键关闭
 ├── nodes/                            # 本仓库写的 ROS 节点
 │   ├── keyboard_joint_controller.py  # 键盘控制（空闲静默，与避障协作）
 │   ├── robot_pose_monitor.py         # 位置感知节点：位姿解算 + TF
@@ -51,7 +47,7 @@ Machine-Vision/
 │   ├── avoid_planner.py              # 内嵌避障 (VFH 简化版), 被导航节点直接调用
 │   └── llm_hint.py                   # LLM/VLM 兜底判边 (LM Studio qwen3.5-9b)
 ├── config/
-│   ├── robot_pose.rviz               # view_camera.sh 用的 RViz 配置（Fixed Frame=odom，带轨迹）
+│   ├── robot_pose.rviz               # RViz 配置（Fixed Frame=odom，带轨迹）
 │   └── requirements.txt              # 系统 Python 侧依赖
 ├── worlds/
 │   └── robot_with_camera.sdf         # Gazebo 世界 + 机器人模型（RGB 相机 + 深度相机）
@@ -96,27 +92,35 @@ cd obstacle_ws && source /opt/ros/jazzy/setup.bash \
 ### 3. 运行
 
 ```bash
-bash all.sh        # 一键：仿真 + YOLO + RViz（会先自动编译避障包）
+bash simulation.sh        # 一键：仿真 + 键盘 + 话题桥 + YOLO + RViz + 定位（会先自动编译避障包）
+bash run.sh 0 8           # 另开终端：导航到 (0, 8)
+bash run.sh stop          # 收工：导航 / 桥 / 仿真 / YOLO / RViz 一起关
 ```
 
-或分终端（脚本都自定位仓库根，任意目录执行都行）：
+根目录只有两个脚本，其余都是子命令（脚本都自定位仓库根，任意目录执行都行）：
 
-```bash
-bash start_simulation.sh        # 终端1：仿真 + 键盘 + 全部话题桥
-bash yolo.sh                    # 终端2：YOLO 检测
-bash run.sh avoid               # 终端3：独立避障节点（可选，与导航互斥）
-bash view_camera.sh             # 终端4：RViz + 深度彩色图（可选）
-```
+| 命令 | 作用 |
+|------|------|
+| `bash simulation.sh` | 带界面全栈：Gazebo + 键盘 + 全部话题桥 + YOLO + RViz + 定位 |
+| `bash simulation.sh mixed` | 同上，直接指定场景（`worlds/scenes/<名字>.sdf`） |
+| `bash simulation.sh headless` | 无界面：`gz sim -s` + 单进程桥，等 `/joint_states` 通了就返回 |
+| `bash simulation.sh view` | 只起 RViz 相机视图（彩色 + 深度伪彩色） |
+| `bash simulation.sh yolo` | 只起 YOLO 检测 |
+| `bash simulation.sh test` | 场景回归：person / lowbox / sym / mixed 全跑，卡死 45 s 自动认输 |
+| `bash simulation.sh test mixed` | 只跑指定场景；`TX=0 TY=6` 可把目标点改近 |
+
+> 旧的 `all.sh` / `start_simulation.sh` / `start_bridges_headless.sh` / `view_camera.sh` / `yolo.sh` / `_test.sh`
+> 已合并进 `simulation.sh`，不再单独存在。
 
 ### 4. 位置感知
 
 ```bash
-python3 nodes/robot_pose_monitor.py   # 需要 start_simulation.sh 已在运行
-# 轨迹/位姿不用另开窗口：all.sh 第 3 路的 RViz2 已带 Path(/robot_path) 与 /odom 箭头
+python3 nodes/robot_pose_monitor.py   # bash simulation.sh 已自动起；手动跑时需仿真在运行
+# 轨迹/位姿不用另开窗口：RViz2 已带 Path(/robot_path) 与 /odom 箭头
 ```
 
-> `all.sh` 已经把它接成第 4 路，并且第 3 路那个 RViz2 窗口本身就用本文的 `robot_pose.rviz`
-> 启动（Fixed Frame = `odom`）——所以**轨迹不用另开窗口**，跑 `all.sh` 就在那个 RViz2 里看到
+> `bash simulation.sh` 已经把它接成第 4 路，并且那个 RViz2 窗口本身就用本文的 `robot_pose.rviz`
+> 启动（Fixed Frame = `odom`）——所以**轨迹不用另开窗口**，跑 `bash simulation.sh` 就在 RViz2 里看到
 > `Path(/robot_path)` 的线和 `Odometry(/odom)` 的箭头；要看相机图仍照旧 Add → Image。
 
 ## 位置感知（机器人 / 相机位姿）
@@ -146,7 +150,7 @@ base 世界位姿 = (x, y, 0.075, yaw)             base 连杆比模型原点高
 
 ### 在终端查看当前位置（使用者最常用）
 
-**前提**：两个终端在跑 —— `bash start_simulation.sh`（提供 `/joint_states`）
+**前提**：两个终端在跑 —— `bash simulation.sh`（提供 `/joint_states`）
 和 `python3 nodes/robot_pose_monitor.py`（位置感知节点）。
 
 **① 最省事：位置感知节点自己每 1 秒打印一行**
@@ -213,7 +217,7 @@ ros2 topic echo /camera_pose --once
 
 | 现象 | 原因 / 处理 |
 |------|------|
-| `--once` 一直卡住不输出 | 没人在发布 → 确认 `start_simulation.sh` 和 `nodes/robot_pose_monitor.py` 都在跑 |
+| `--once` 一直卡住不输出 | 没人在发布 → 确认 `simulation.sh` 和 `nodes/robot_pose_monitor.py` 都在跑 |
 | `ros2: command not found` | 忘了 `source /opt/ros/jazzy/setup.bash`，或不在 WSL 里 |
 | 数值一直是 0 | `/joint_states` 没数据 → `ros2 topic echo /joint_states --once`，应含 `drive_x_joint` / `drive_y_joint` / `base_yaw_joint` |
 
@@ -245,7 +249,7 @@ ros2 run tf2_tools view_frames  # 生成 TF 树 PDF
 ### 开跑
 
 ```bash
-bash start_simulation.sh     # 终端1：仿真 + 话题桥（bash all.sh 也可以）
+bash simulation.sh          # 终端1：全栈（或 headless 只起仿真 + 桥）
 bash run.sh                  # 终端2：不带参数 = 交互模式
 ```
 
@@ -342,13 +346,13 @@ ros2 topic echo /nav_goal_reached --once
 
 `keyboard_joint_controller.py` 订阅了 `/navigation_status`：状态为 `MOVING` 时键盘控制器**完全静默**
 （不碰关节话题、也不发 override），日志打 `导航接管中, 键盘静默`；导航一结束自动打
-`导航已结束, 键盘恢复`，方向键立刻又能用。所以 `all.sh` 全栈开着也不会和导航抢关节话题。
+`导航已结束, 键盘恢复`，方向键立刻又能用。所以 `bash simulation.sh` 全栈开着也不会和导航抢关节话题。
 
 ### 排错
 
 | 现象 | 原因 / 处理 |
 |------|------|
-| `✗ 没检测到 Gazebo 仿真进程` | 先在另一个终端 `bash start_simulation.sh` |
+| `✗ 没检测到 Gazebo 仿真进程` | 先在另一个终端 `bash simulation.sh` |
 | 一直「还没收到 /joint_states」 | 话题桥没起：`ros2 topic echo /joint_states --once` 应有三个关节；也可 `ros2 node list --no-daemon` 确认 `/ros_gz_bridge` 在 |
 | 走了一半自己停 | 看日志：`定位中断` 会等恢复；`控制权被抢占` 说明有别的节点在发 `/drive_*` |
 | 机器人抖动 / 抢关节 | 确认只有一个导航或键盘节点在跑：`pgrep -af 'navigate_to_pose|keyboard_joint' ` |
@@ -364,7 +368,7 @@ ros2 topic echo /nav_goal_reached --once
 | `/camera/camera_info` | `sensor_msgs/CameraInfo` | RGB 内参 |
 | `/depth_camera` | `sensor_msgs/Image` | 深度图（32FC1，单位米，inf = 未命中） |
 | `/depth_camera/camera_info` | `sensor_msgs/CameraInfo` | 深度内参 |
-| `/depth_camera/colorized` | `sensor_msgs/Image` | 深度伪彩色（view_camera.sh 里的 depth_probe 发布） |
+| `/depth_camera/colorized` | `sensor_msgs/Image` | 深度伪彩色（bash simulation.sh view 里的 depth_probe 发布） |
 | `/joint_states` | `sensor_msgs/JointState` | 三个关节真值 |
 | `/camera_joint_controller/commands` | `std_msgs/Float64` | 相机旋转关节目标角 |
 | `/drive_x/commands`、`/drive_y/commands` | `std_msgs/Float64` | 底盘平移位置指令 |
