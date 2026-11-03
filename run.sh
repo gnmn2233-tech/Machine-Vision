@@ -16,6 +16,7 @@
 #                                    卡死早停: 30 s 挪不动 0.25 m 就打印 ✗ 并以退出码 2
 #                                    结束 (默认 45 s, 0 = 关掉, 一直试)
 #   bash run.sh avoid                老的独立避障节点 (obstacle_avoider)
+#   bash run.sh stop                 一键关掉仿真 + 桥 + 节点 (原 stop.sh)
 #
 # 导航模式下避障是**内嵌**的: nodes/navigate_to_pose.py 里的 AvoidPlanner,
 # 离目标 > 0.30 m 时全程生效, 进入 0.30 m 交给终点停靠。
@@ -31,6 +32,28 @@ set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---- 停止: 原来单独的 stop.sh, 并进来了 (脚本太多, 一个入口够用) -----------
+if [ "${1:-}" = stop ] || [ "${1:-}" = kill ] || [ "${1:-}" = down ]; then
+    echo "==> 关闭导航与避障节点"
+    pkill -9 -f navigate_to_pose.py 2>/dev/null
+    pkill -9 -f obstacle_avoider 2>/dev/null
+    echo "==> 关闭话题桥"
+    pkill -9 -f ros_gz_bridge 2>/dev/null
+    pkill -9 -f parameter_bridge 2>/dev/null
+    echo "==> 关闭 YOLO 与 RViz"
+    pkill -9 -f yolo 2>/dev/null
+    pkill -9 -f rviz2 2>/dev/null
+    echo "==> 关闭 Gazebo"
+    pkill -f "gz sim" 2>/dev/null
+    sleep 2
+    pkill -9 -f "gz sim" 2>/dev/null
+    pkill -9 -f "gz-sim" 2>/dev/null
+    sleep 1
+    left=$(pgrep -af "gz sim|gz-sim|ros_gz_bridge|navigate_to_pose|obstacle_avoider|rviz2" | cut -c1-70)
+    if [ -z "$left" ]; then echo "    (无残留, 已全部关闭)"; else echo "$left"; fi
+    exit 0
+fi
+
 source /opt/ros/jazzy/setup.bash
 export GZ_SIM_RESOURCE_PATH="$ROOT/mod:${GZ_SIM_RESOURCE_PATH:-}"
 
@@ -38,6 +61,7 @@ export GZ_SIM_RESOURCE_PATH="$ROOT/mod:${GZ_SIM_RESOURCE_PATH:-}"
 MODE=nav
 case "${1:-}" in
     avoid|old|avoider) MODE=avoid; shift ;;
+    stop|kill|down)  MODE=stop; shift ;;
 esac
 
 if ! pgrep -f "gz sim" >/dev/null 2>&1; then

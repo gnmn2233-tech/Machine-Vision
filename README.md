@@ -41,13 +41,15 @@ Machine-Vision/
 ├── all.sh                            # 一键：清理残留 + 自动编译避障包 + 依次起 仿真/YOLO/RViz
 ├── start_simulation.sh               # 仿真 + 键盘 + 全部话题桥
 ├── yolo.sh                           # 启动 YOLO 检测
-├── run.sh                            # 统一启动：默认导航+内嵌避障；run.sh avoid = 旧避障节点
-├── stop.sh                           # 一键关掉仿真+桥+节点（没窗口/卡死时用）
+├── run.sh                            # 统一入口：默认导航+内嵌避障；avoid = 旧避障节点；stop = 一键关闭
+├── _suite.sh / _mixed.sh             # 场景回归（person/low_box/symmetric 与混合障碍）
 ├── view_camera.sh                    # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
 ├── nodes/                            # 本仓库写的 ROS 节点
 │   ├── keyboard_joint_controller.py  # 键盘控制（空闲静默，与避障协作）
 │   ├── robot_pose_monitor.py         # 位置感知节点：位姿解算 + TF
-│   └── navigate_to_pose.py           # 导航节点：输入坐标 → 平滑移动到坐标处
+│   ├── navigate_to_pose.py           # 导航节点：输入坐标 → 平滑移动到坐标处
+│   ├── avoid_planner.py              # 内嵌避障 (VFH 简化版), 被导航节点直接调用
+│   └── llm_hint.py                   # LLM/VLM 兜底判边 (LM Studio qwen3.5-9b)
 ├── config/
 │   ├── robot_pose.rviz               # view_camera.sh 用的 RViz 配置（Fixed Frame=odom，带轨迹）
 │   └── requirements.txt              # 系统 Python 侧依赖
