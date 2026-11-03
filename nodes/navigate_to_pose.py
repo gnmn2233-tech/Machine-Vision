@@ -835,7 +835,7 @@ class Navigator(Node):
                 if now >= self._detour_until:
                     self._detour_heading = None     # 窗口结束, 交回几何
                 elif (self._detour_heading is None
-                        and plan.state == NAV and plan.advance):
+                        and plan.advance and plan.state != HOLD):
                     # 锁定一个**绝对**绕行角, 定了就不再改。三条教训都来自实测:
                     # ①挂在当前车头(yaw + 40)是正反馈, 车原地转两整圈
                     #   (lb4: 131 -> 178 -> -129 -> -55);
@@ -863,20 +863,29 @@ class Navigator(Node):
                     if s:
                         self._detour_side = s
                         self._detour_last = s
-                        self._detour_until = now + 8.0
-                        # 55 度而不是 40: 车是斜着顶在箱子上的, 前进指令的
-                        # 纵向分量几乎全被吃掉, 只能靠更大的横向分量把自己
-                        # 从箱子侧面「犁」出去(lb7 用 40 度, 6 秒只挪了 0.5 m)。
+                        self._detour_until = now + 7.0
+                        # 90 度而不是 55: p18 场景(车距矮箱前缘只剩 0.35 m 才起步)
+                        # 实测 55 度也救不了 —— 纵向分量 cos55=0.57, 走 0.6 m 就再次
+                        # 顶住, 横向只挪了 0.49 m, 而箱宽 0.8 m + 车半宽 0.15 m 要求
+                        # 至少侧移 0.55 m。日志里车头在 +121/-9 度之间每秒翻边、
+                        # 位置只在 ±0.03 m 内抖, 全程 180 s 没出去。改为垂直侧移:
+                        # 先原地转到与目标垂直, 再直行 —— 这个底盘只会沿车头直行,
+                        # 垂直方向才是它唯一能「横着走」的方式。
                         self._detour_heading = wrap_pi(
-                            plan.goal_dir + math.radians(55.0 * s))
+                            plan.goal_dir + math.radians(90.0 * s))
+                # 原来这里卡 plan.state == NAV, 意思是「只有几何判直冲时才接管」。
+                # 可 depth 兜底(:576)已经会把矮箱判成一堵墙, 于是几何输出的是
+                # DODGE +30 度而不是 NAV —— 接管条件永远不成立, 兜底逻辑形同虚设。
+                # p18 日志: 全程 138 行都是「DODGE +29 deg ... [挡: depth 0.42 m]」,
+                # 车头被这个 +30 度带着走, 而 30 度在 0.05 m 的贴脸间隙里毫无用处。
                 if (self._detour_heading is not None
-                        and plan.state == NAV and plan.advance):
-                    cl = self.avoider.clearance(55.0 * self._detour_side, now)
+                        and plan.advance and plan.state != HOLD):
+                    cl = self.avoider.clearance(90.0 * self._detour_side, now)
                     plan = Plan(state=DODGE, heading=self._detour_heading,
                                 goal_dir=plan.goal_dir, side=self._detour_side,
                                 advance=True,
                                 reason='обход невидимого (%+d deg)'
-                                       % (55 * self._detour_side),
+                                       % (90 * self._detour_side),
                                 clear=cl if cl is not None else float('inf'))
             else:
                 # 诊断: 两者都过期时避障整段关闭(plan=None), 车会笔直撞上去却不报错。
