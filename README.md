@@ -42,7 +42,7 @@ Machine-Vision/
 ├── start_simulation.sh               # 仿真 + 键盘 + 全部话题桥
 ├── yolo.sh                           # 启动 YOLO 检测
 ├── run.sh                            # 统一入口：默认导航+内嵌避障；avoid = 旧避障节点；stop = 一键关闭
-├── _suite.sh / _mixed.sh             # 场景回归（person/low_box/symmetric 与混合障碍）
+├── _test.sh                          # 场景回归: bash _test.sh [person lowbox sym mixed]
 ├── view_camera.sh                    # RViz2（相机图 + 轨迹）+ 深度彩色图发布 + 静态 TF
 ├── nodes/                            # 本仓库写的 ROS 节点
 │   ├── keyboard_joint_controller.py  # 键盘控制（空闲静默，与避障协作）
