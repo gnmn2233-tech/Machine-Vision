@@ -38,3 +38,17 @@ Thumbs.db
 # 归档目录（如果你确实想传，把这两行删掉）
 _archive/
 dabao/
+
+# 研究资料（385 MB PDF, 不进仓库）
+docs/
+
+# 场景/模型备份
+*.bak
+*.bak_*
+*.pre_*
+
+# 一次性的调试脚本（_dbg/_probe/_ab 前缀, 别攒在 nodes/ 里）
+nodes/_dbg*.py
+nodes/_probe_*.py
+nodes/_ab_*.py
+nodes/_ab_*.sh
