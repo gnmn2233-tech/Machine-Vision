@@ -45,6 +45,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 
 import rclpy
 from geometry_msgs.msg import Pose2D, PoseStamped
@@ -177,6 +178,13 @@ class Navigator(Node):
         self.declare_parameter('avoid_depth_topic', '/depth_camera')
         self.declare_parameter('avoid_scan_topic', '/scan')   # 激光雷达: 给了就优先用它
         self.declare_parameter('llm', True)                 # 避障拿不定主意时问 LLM/VLM
+        # 响应时间统计 (ТЗ 4.2.2). 0 = 关闭 (默认, 零开销);
+        # N > 0 = 采满 N 个连续周期打印一次分位数, 随即自动停止 —— 只测一次, 写报告用。
+        self.declare_parameter('latency_report_every', 0)
+        # 卡死早停: 位姿连续这么久没有推进 (>0.25 m 以内打转) 就判这次导航失败,
+        # 打印 ✗ 并以退出码 2 结束 —— 卡住就是没绕过去, 没必要耗到外层超时。
+        # 0 = 关闭 (想让它一直试就一直试)。测试脚本默认 45 s。
+        self.declare_parameter('stall_abort', 45.0)
         self.declare_parameter('llm_view_topic', '/camera')  # VLM 用的彩色图
 
         self.v_max = float(self.get_parameter('v_max').value)
@@ -224,6 +232,7 @@ class Navigator(Node):
         self.pub_y = self.create_publisher(Float64, TOPIC_Y, 10)
         self.pub_yaw = self.create_publisher(Float64, TOPIC_YAW, 10)
         self.pub_override = self.create_publisher(Float64, '/avoider_override', 10)
+        self.pub_latency = self.create_publisher(Float64, '/nav_latency', 10)
         self.pub_status = self.create_publisher(String, '/navigation_status', 10)
         self.pub_reached = self.create_publisher(Bool, '/nav_goal_reached', 10)
 
@@ -249,6 +258,14 @@ class Navigator(Node):
         self.avoid_scan_topic = str(self.get_parameter('avoid_scan_topic').value)
         self._scan = None          # 最近一帧激光雷达 (ranges, angle_min, angle_increment)
         self._scan_t = 0.0
+        # ---- 响应时间度量: 传感器帧 -> 控制指令 (ТЗ 4.2.2) ----
+        self._lat = deque(maxlen=5000)   # 端到端延迟样本 (秒)
+        self._lat_n = 0
+        self._lat_every = int(self.get_parameter('latency_report_every').value)
+        self._lat_on = self._lat_every > 0    # 一次性开关: 采满即关
+        # ---- 卡死早停 (stall_abort) ----
+        self._stall_abort = float(self.get_parameter('stall_abort').value)
+        self._stall_hist = deque(maxlen=8000)
         self._avoid_log_t = 0.0
         self._plan_sig = None       # 上一次打印过的避障状态签名, 用来去重 (见日志段)
         self._warn_danger = False   # 是否已经报过「贴脸」警告, 出去就复位
@@ -706,6 +723,7 @@ class Navigator(Node):
         self.state = self.MOVING
         self.goal_start = time.time()
         self.steal_since = None
+        self._stall_hist.clear()            # 新目标: 卡死计时重新开始
         gx, gy, gyaw = self.goal
         self.get_logger().info(
             f'Старт -> ({gx:+.2f}, {gy:+.2f})'
@@ -727,6 +745,9 @@ class Navigator(Node):
             self.pub_override.publish(Float64(data=0.0))
         self.pub_reached.publish(Bool(data=False))
         self._publish_status('отменено')
+        if self._lat_on and self._lat_n:      # 行程提前结束: 有多少算多少, 只报一次
+            self._lat_on = False
+            self._log_latency('итог')
 
     # ================= 主循环 =================
     def on_timer(self):
@@ -1009,9 +1030,32 @@ class Navigator(Node):
         self.pub_x.publish(Float64(data=cmd_x))
         self.pub_y.publish(Float64(data=cmd_y))
         self.pub_yaw.publish(Float64(data=yaw_cmd))
+        self._record_latency(time.time())
         self._override_on = True
         self.pub_override.publish(Float64(data=1.0))     # 运动期间由导航接管
         self._last_cmd_x, self._last_cmd_y, self._last_cmd_yaw = cmd_x, cmd_y, yaw_cmd
+
+        # ---- 卡死早停: 45 s 挪不动 0.25 m 就是没绕过去 ----
+        # 只在「该走但走不动」时判定: 到点后的原地转向、起点等定位都不参与。
+        if self._stall_abort > 0.0 and not arrived_xy and self.state == self.MOVING:
+            t_st = time.time()
+            self._stall_hist.append((t_st, self.x, self.y))
+            while self._stall_hist and t_st - self._stall_hist[0][0] > self._stall_abort:
+                self._stall_hist.popleft()
+            if (len(self._stall_hist) > 50
+                    and t_st - self._stall_hist[0][0] >= self._stall_abort * 0.95):
+                _t0, sx, sy = self._stall_hist[0]
+                if math.hypot(self.x - sx, self.y - sy) < 0.25:
+                    self.get_logger().error(
+                        f'✗ Застрял: {self._stall_abort:.0f}с без продвижения '
+                        f'(x={self.x:+.2f} y={self.y:+.2f}), бросаю цель')
+                    self.cmd_x, self.cmd_y = self.x, self.y
+                    self.pub_x.publish(Float64(data=self.x))
+                    self.pub_y.publish(Float64(data=self.y))
+                    self.pub_override.publish(Float64(data=1.0))
+                    self._publish_status('застрял')
+                    self._stall_hist.clear()
+                    raise SystemExit(2)
 
         # ---- 到点 ----
         if arrived_xy and arrived_yaw:
@@ -1026,6 +1070,9 @@ class Navigator(Node):
                 f'yaw={math.degrees(self.yaw.value):+.1f} deg'
                 f' | ошибка {dist * 1000:.0f} мм')
             self._publish_status('прибыл')
+            if not self.queue and self._lat_on and self._lat_n:
+                self._lat_on = False
+                self._log_latency('итог')
             self.goal = None
             self._start_next()                       # 队列里还有就继续走
             return
@@ -1040,6 +1087,41 @@ class Navigator(Node):
                 f'| 当前 ({self.x:+.2f}, {self.y:+.2f}) yaw={math.degrees(self.yaw.value):+.0f} deg'
                 f' -> цель ({gx:+.2f}, {gy:+.2f})')
             self._publish_status(phase)
+
+    def _record_latency(self, t_cmd):
+        """一次「传感器帧 -> 控制指令」的端到端延迟 (秒), 对应 ТЗ 4.2.2。
+
+        帧取本周期真正参与决策的那一帧 —— 雷达/深度里最新的到达时刻。传感器
+        还没上线时这条指标没有意义 (避障也没开), 直接跳过。
+        """
+        if not self._lat_on:
+            return
+        t_frame = max(self._scan_t, self._depth_t)
+        if t_frame <= 0.0 or t_cmd <= t_frame:
+            return
+        lat = t_cmd - t_frame
+        self._lat.append(lat)
+        self._lat_n += 1
+        self.pub_latency.publish(Float64(data=lat))
+        if self._lat_n >= self._lat_every:
+            self._lat_on = False                       # 采满即停, 只测一次
+            self._log_latency(f'一次性测量, {self._lat_n} 个连续周期')
+
+    def _log_latency(self, tag=''):
+        """打印累计的响应时间分位数, 格式直接对应验收表。"""
+        v = sorted(self._lat)
+        if not v:
+            return
+        n = len(v)
+
+        def q(p):
+            return v[min(n - 1, int(round(p * (n - 1))))]
+
+        over = sum(1 for x in v if x > 1.0)
+        self.get_logger().info(
+            f'⏱ 响应时间 {tag}: n={n} p50={q(0.5) * 1000:.0f}мс '
+            f'p95={q(0.95) * 1000:.0f}мс max={v[-1] * 1000:.0f}мс '
+            f'| >1с: {over} ({over * 100.0 / n:.1f}%)')
 
     def _publish_status(self, text):
         msg = String()

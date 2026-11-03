@@ -89,6 +89,10 @@ class Config:
                               # (90 度能砍掉倒车, 但 3m 宽墙要横移 1.5m+, 会卡死; 110 两头都过)
     look_hold: float = 2.5    # 「转过去看」这个动作要粘住这么久 (s): 转向约 1 rad/s,
                               # 转 90 度要 1.6 s, 每周期重算会让车头原地抖 (实测 ±100 度翻)
+    look_deadline: float = 4.0  # 一次「转过去看」最多看这么久 (s); 超时说明那不是
+                                # 「没看过」而是「真堵」, 标记这一侧为死角并换边。
+                                # mixed 场景实测: 车头 159 度、目标 69 度, 每帧都出 look +90,
+                                # HOLD 只转不走, 原地钉了 90 s。
     step_deg: float = 10.0    # 方向搜索步长 (deg)
     fuse_depth: bool = False  # 有雷达时是否仍把深度图并进记忆; 默认关, 理由见 _merge_depth
     scan_max: float = 9.0     # 激光雷达读数超过它就算「这一边空旷」(m)。
@@ -142,6 +146,10 @@ class AvoidPlanner:
         # 是提前打方向的量, 拿它当警报线会吓人; 真正会撞的线是 safe_dist。
         self.front_gap = INF
         self._look_until = 0.0
+        self._look_t0 = 0.0       # 这一次「转过去看」从什么时候开始 (超时换边, 见 look_deadline)
+        self._look_dir = None     # 这一次 look 盯着的绝对方位; 方向变了才重新计时
+        self._dead_side = 0.0     # 刚被证明走不通的那一侧 (+1 左 / -1 右), 短时避开
+        self._dead_until = 0.0
         self.scan_ok = False      # 本帧拿到了激光雷达没有
         self._raw_scan = None     # 最近一帧原始雷达 (ranges, angle_min, angle_inc)
         self.narrow_why = ''      # 窄缝判定为什么没成立, 供日志标定 (调试用)
@@ -219,6 +227,10 @@ class AvoidPlanner:
         self._py = None
         self._commit = 0.0
         self._commit_until = 0.0
+        self._look_t0 = 0.0
+        self._look_dir = None
+        self._dead_side = 0.0
+        self._dead_until = 0.0
         self._llm_side = 0
         self._llm_until = 0.0
         self._llm_conf = 0.0
@@ -304,6 +316,7 @@ class AvoidPlanner:
             # 车头已经贴到障碍上: 先停, 别靠转向硬蹭
             self.state = HOLD
             self._look_heading = None            # 贴脸先停下, 别粘着旧方向硬转
+            self._look_t0 = 0.0
             return self._plan(HOLD, yaw, goal_dir, 0, False,
                               'too close: %.2f m' % near_now, near_now)
 
@@ -346,6 +359,10 @@ class AvoidPlanner:
                                  '%.2f' % near_now if near_now is not None else '?'),
                               clear)
         # kind == 'look': 这个方向没测过(或全堵), 只转过去看, 不前进
+        if (self._look_t0 == 0.0 or self._look_dir is None
+                or abs(wrap_pi(heading - self._look_dir)) > math.radians(45.0)):
+            self._look_t0 = now                 # 盯的方向变了才算新的一次「转过去看」
+        self._look_dir = heading
         self._look_heading = heading            # 粘住, 下几帧继续朝它转
         self._look_until = now + c.look_hold
         self.state = DODGE if abs(wrap_pi(heading - yaw)) > math.radians(8.0) else HOLD
@@ -715,6 +732,22 @@ class AvoidPlanner:
         # 少了这一步, 车会绕着目标转大圈: 绕行方向一旦选定就每帧续期,
         # 于是一直朝"目标方向 +100 度"开, 永远到不了 (踩过这个坑)。
         gp = wrap_pi(goal_dir)
+        # 0-) 「转过去看」不能看太久: 车头早就对准那个方向仍判不通, 那不是「没看过」
+        # 而是「真堵」。mixed 场景实测: 车头 159 度、目标 69 度, 每帧输出 look +90,
+        # 而 HOLD 只让转向不前进 -> 车原地钉了 90 s。超时就把这一侧记成死角, 换另一边。
+        if (self._look_heading is not None and self._look_t0
+                and now - self._look_t0 > c.look_deadline):
+            deg_look = math.degrees(wrap_pi(self._look_heading - gp))
+            if abs(deg_look) > c.step_deg * 0.5:
+                self._dead_side = 1.0 if deg_look > 0 else -1.0
+            else:
+                self._dead_side = -1.0 if self.side > 0 else 1.0
+            self._dead_until = now + 5.0
+            self._look_heading = None
+            self._look_t0 = 0.0
+            self._look_dir = None
+            self._commit = 0.0
+            self._commit_until = 0.0
         # 0') 「转过去看」要粘住: 车体转向约 1 rad/s, 转 90 度要 1.6 s, 而这里每周期
         # 重算一次。不粘的话 plan.heading 会每秒翻一次符号 (实测 +100/-90 来回),
         # 车头物理上停在中间两头不到, 一步也走不了 (2026-10-27 行人场景 80 次 DODGE 卡死)。
@@ -748,6 +781,9 @@ class AvoidPlanner:
         # 车头就在两个方向之间来回转, 一步也挪不动 (踩过这个坑)。
         # 但坚持得有上限: 绕行方向每帧续期的话车会一直沿它绕圈、永远不回家,
         # 所以 commit_max 一到就放它回去重新看一眼目标 (踩过这个坑)。
+        if (self._dead_side and now < self._dead_until
+                and self._commit * self._dead_side > 0):
+            self._set_commit(0.0, now)         # 这一侧刚被证明是死角, 别再坚持
         if (self._commit and now < self._commit_until
                 and abs(self._commit) > c.step_deg * 0.5):
             if now - self._commit_t0 >= c.commit_max:
@@ -801,6 +837,9 @@ class AvoidPlanner:
         # 能回答的问题。所以改成 SayCan 式加权: 只在几何平局 (_doubtful) 时才让它改序,
         # 差得超过 llm_tie_deg 就一律按几何走 —— 判据始终在几何手里。
         pref = self.side
+        if (self._dead_side and now < self._dead_until
+                and pref * self._dead_side > 0):
+            pref = -pref              # 这一侧刚被证明走不通, 先试另一边
         src = ''
         if self._llm_side and self.llm_active(now):
             # 原来这里有一句 print('DBG ...') 做诊断。现在改成把「这场平局长什么样」
@@ -871,6 +910,14 @@ class AvoidPlanner:
                 best_k, best_d = k, d
         if best_d is not None and best_d >= c.hard_dist:
             ang = wrap_pi(gp + math.radians(best_k * c.step_deg))
+            # 车头已经对准这个最宽方向、而且正前方够远: 那就不是「转过去看」,
+            # 是「贴着走」。一直返回 look, 上层会进 HOLD (只转向不前进), 车原地
+            # 钉死 —— mixed 场景实测 90 s 一步没动。侧向 0.40 m 的余量是给行人
+            # 留的, 静止箱体按车宽 (0.30) 判就够, 近距保护仍由 hard_dist 兜着。
+            if (abs(wrap_pi(ang - self._yaw)) < math.radians(c.step_deg)
+                    and best_d >= c.safe_dist):
+                self._look_heading = None
+                return (ang, float(best_k) * c.step_deg, best_d, 'go' + src)
             return (ang, float(best_k) * c.step_deg, best_d, 'look' + src)
         return None
 

@@ -8,6 +8,13 @@
 #   bash run.sh 2.0 -1.0 --yaw 90    走到 (2, -1) 并转到 90 度
 #   bash run.sh 1 0 2 1 0 0          多航点, 依次走 (1,0) -> (2,1) -> (0,0)
 #   bash run.sh -p v_max:=0.8 3 -3   改速度上限 (m/s)
+#   bash run.sh 0 8 -p latency_report_every:=200
+#                                    顺手采一次响应时间统计 (ТЗ 4.2.2): 采满 200 个连续
+#                                    周期打印一次分位数, 随即自动停止采样。默认 0 = 不测
+#                                    (一次 180 s 行程打 75 行会把日志淹掉, 实测)
+#   bash run.sh 0 8 -p stall_abort:=30
+#                                    卡死早停: 30 s 挪不动 0.25 m 就打印 ✗ 并以退出码 2
+#                                    结束 (默认 45 s, 0 = 关掉, 一直试)
 #   bash run.sh avoid                老的独立避障节点 (obstacle_avoider)
 #
 # 导航模式下避障是**内嵌**的: nodes/navigate_to_pose.py 里的 AvoidPlanner,
