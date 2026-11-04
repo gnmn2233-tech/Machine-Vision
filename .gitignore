@@ -52,3 +52,4 @@ nodes/_dbg*.py
 nodes/_probe_*.py
 nodes/_ab_*.py
 nodes/_ab_*.sh
+*.bak2

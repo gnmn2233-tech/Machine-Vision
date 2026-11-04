@@ -36,6 +36,26 @@ clean_all() {
     rm -f /tmp/gz-sim-*.log /tmp/gz-*.lock 2>/dev/null
 }
 
+# ---------- 墙面贴图: 缺失时自动下载 (CC0 砖墙 albedo, 供 worlds 里的 PBR 材质引用) ----------
+# 贴图放 mod/wall_textures/ (已随 GZ_SIM_RESOURCE_PATH 导出), SDF 里写
+# model://wall_textures/brick_diffuse.jpg 即可, 不写死在绝对路径, 换机器也能用。
+ensure_wall_textures() {
+    local f="$ROOT/mod/wall_textures/brick_diffuse.jpg"
+    [ -s "$f" ] && return 0
+    mkdir -p "$(dirname "$f")"
+    echo "==> Загрузка текстуры кирпичной стены..."
+    for url in         "https://cdn.jsdelivr.net/gh/mrdoob/three.js@dev/examples/textures/brick_diffuse.jpg"         "https://threejs.org/examples/textures/brick_diffuse.jpg"; do
+        if curl -fsSL --connect-timeout 10 --max-time 90 -o "$f.part" "$url" 2>/dev/null && [ -s "$f.part" ]; then
+            mv "$f.part" "$f"
+            echo "✓ Текстура: $(du -h "$f" | cut -f1)"
+            return 0
+        fi
+    done
+    rm -f "$f.part"
+    echo "⚠️  Текстура не скачана — стены будут серыми (положите файл в $f)"
+    return 1
+}
+
 # ---------- 场景选择: $1 > 环境变量 SCENE > 交互 > person ----------
 pick_scene() {
     local want="${1:-${SCENE:-}}"
@@ -162,6 +182,9 @@ case "$CMD" in
     *) # 第一个参数不是子命令: 当场景名处理 (bash simulation.sh mixed)
        SCENE_ARG="$CMD"; CMD=run ;;
 esac
+
+# 墙贴图先备好 (幂等: 有文件就跳过), 只对真正起仿真的分支生效
+case "$CMD" in run|gui|headless|sim|test) ensure_wall_textures ;; esac
 
 # =========================== 带界面全量 ===========================
 if [ "$CMD" = run ] || [ "$CMD" = gui ]; then

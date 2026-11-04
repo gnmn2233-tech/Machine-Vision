@@ -81,7 +81,17 @@
         <collision name='c'><geometry><box><size>0.8 0.4 0.1</size></box></geometry></collision>
         <visual name='v'>
           <geometry><box><size>0.8 0.4 0.1</size></box></geometry>
-          <material><ambient>0.85 0.55 0.1 1</ambient><diffuse>0.85 0.55 0.1 1</diffuse></material>
+          <material>
+            <ambient>0.42 0.34 0.26 1</ambient>
+            <diffuse>0.72 0.60 0.46 1</diffuse>
+            <pbr>
+              <metal>
+                <albedo_map>file:///root/gz_ros/mod/wall_textures/wood_plank.jpg</albedo_map>
+                <roughness>0.85</roughness>
+                <metalness>0.0</metalness>
+              </metal>
+            </pbr>
+          </material>
         </visual>
       </link>
     </model>
@@ -92,7 +102,17 @@
         <collision name='c'><geometry><box><size>1.0 0.4 0.6</size></box></geometry></collision>
         <visual name='v'>
           <geometry><box><size>1.0 0.4 0.6</size></box></geometry>
-          <material><ambient>0.8 0.2 0.2 1</ambient><diffuse>0.8 0.2 0.2 1</diffuse></material>
+          <material>
+            <ambient>0.45 0.42 0.40 1</ambient>
+            <diffuse>0.70 0.66 0.62 1</diffuse>
+            <pbr>
+              <metal>
+                <albedo_map>file:///root/gz_ros/mod/wall_textures/brick_diffuse.jpg</albedo_map>
+                <roughness>0.9</roughness>
+                <metalness>0.0</metalness>
+              </metal>
+            </pbr>
+          </material>
         </visual>
       </link>
     </model>
