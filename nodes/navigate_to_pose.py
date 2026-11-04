@@ -13,7 +13,8 @@
 所以本节点的控制量 = "下一个位置指令"。
 
 运动律与 keyboard_joint_controller.py 完全一致 —— 底盘只会「原地转向」和「沿车头前进」:
-  1) 目标方向与车头夹角 > heading_gate (默认 8.6 deg) -> 先原地转向对准, 期间不前进;
+  1) 目标方向与车头夹角 > heading_gate (默认 34 deg) -> 先原地转向对准, 期间不前进;
+     夹角之内边走边转 (弧线), 速度按夹角平方衰减 —— 不再为 10 度偏差整个停一下;
   2) 对准后沿车头方向直行, 每 tick 前进 v*dt (v = min(v_max, sqrt(2*a*dist))),
      边走边用 turn_gain 做小角度修正, 车头始终朝运动方向;
   3) 进入 arrive_eps 停车; 若目标带了朝向, 再原地转到该朝向。
@@ -65,6 +66,7 @@ try:
     from sensor_msgs.msg import Image
     from avoid_planner import (AvoidPlanner, Config as AvoidConfig, DODGE, HOLD,
                                NAV, Plan, compute_sectors)
+    from grid_map import GridMap
     AVOID_OK = True
     AVOID_ERR = ''
 except Exception as _avoid_exc:      # 缺 cv_bridge / numpy / 同目录文件
@@ -86,6 +88,15 @@ except Exception:
     cv2 = None
     np = None
 
+# ---- YOLO 检测框 (可选) ----
+# 把 /yolo/detections 画到喂给 VLM 的那张图上: 模型自己认不出「前景里有几个
+# 什么东西」, 但它看得懂图上的方框和字。YOLO 给框, 几何给方位刻度,
+# 各司其职。依赖缺失 / YOLO 没起 都只是少几个框, 不影响导航。
+try:
+    from yolo_msgs.msg import DetectionArray as YoloDetectionArray
+except Exception:
+    YoloDetectionArray = None
+
 AVOID_DEPTH_TTL = 0.8   # 深度图超过这么久没更新 -> 不信旧图, 按原逻辑走
 
 # ---- 与 SDF 一致 ----
@@ -106,10 +117,16 @@ DEFAULT_YAW_EPS = 0.02     # 到点判定: 朝向误差 < 1.15 deg
 DEFAULT_HZ = 50.0
 DEFAULT_TIMEOUT = 180.0    # 单个目标点超时 (s)
 HEADING_GATE = 0.15        # 朝向偏差超过该值 (rad) 先原地转向, 不前进
+                           # (2026-11-04 试过 0.60 边走边转: mixed (1,8) 从 61 s 变 79 s,
+                           #  绕行时带着 20-35 度偏角前进, 车头追不上指令, 反而更碎)
+NEAR_GATE = 0.15           # 距目标 < NEAR_GATE_DIST 时收紧到这个门限, 保终点精度
+NEAR_GATE_DIST = 0.80
 NEAR_FIELD = 0.30          # 进入该距离 (m) 后不再让避障介入: 近场 dx/dy 抖动比障碍还大
 NEAR_HEADING = 0.10        # 进入该距离 (m) 后才锁目标方向 (m): 0.30 m 就锁会让车头
                            # 黏在旧方向上、以固定速度冲过目标, 在终点绕圈 (踩过这个坑)
-MAX_LEAD = 0.25            # 指令最多超前实测多少 (m): 这就是伺服滞后时可能冲过的距离
+MAX_LEAD = 0.55            # 指令最多超前实测多少 (m)。这个值直接决定最高速度:
+                           # 稳态速度 ≈ MAX_LEAD / 伺服滞后时间, 0.25 m 配 0.85 s 滞后
+                           # 只有 0.29 m/s, 实测 8 m 走了 28 s 就是这个原因 (v_max 0.5 用不满)
 MAX_YAW_LEAD = 0.35        # 角度指令最多超前实测多少 (rad)
 TURN_GAIN = 2.0            # 前进过程中朝向修正的 P 增益
 STALE_PAUSE = 1.0          # 定位断流超过该时长 -> 暂停推进 (等定位恢复)
@@ -172,12 +189,17 @@ class Navigator(Node):
         self.declare_parameter('goal_timeout', DEFAULT_TIMEOUT)
         self.declare_parameter('heading_gate', HEADING_GATE)
         self.declare_parameter('turn_gain', TURN_GAIN)
+        self.declare_parameter('max_lead', MAX_LEAD)
         self.declare_parameter('face_motion', False)   # 已废弃: 现在总是朝运动方向
         self.declare_parameter('use_orientation', False)
         self.declare_parameter('avoid', True)              # 运动途中自动避障
         self.declare_parameter('avoid_depth_topic', '/depth_camera')
         self.declare_parameter('avoid_scan_topic', '/scan')   # 激光雷达: 给了就优先用它
         self.declare_parameter('llm', True)                 # 避障拿不定主意时问 LLM/VLM
+        # 局部栅格 + A* (grid_map.py): 给 VFH 一层「该往哪走」。
+        # 默认关 —— 2026-11-04 实测: 开着反而在 mixed 场景必卡 (见 README 记录),
+        # 三个常规场景 (person/lowbox/sym) 无差别。想试就 -p grid_on:=true。
+        self.declare_parameter('grid_on', False)
         # 响应时间统计 (ТЗ 4.2.2). 0 = 关闭 (默认, 零开销);
         # N > 0 = 采满 N 个连续周期打印一次分位数, 随即自动停止 —— 只测一次, 写报告用。
         self.declare_parameter('latency_report_every', 0)
@@ -186,6 +208,11 @@ class Navigator(Node):
         # 0 = 关闭 (想让它一直试就一直试)。测试脚本默认 45 s。
         self.declare_parameter('stall_abort', 45.0)
         self.declare_parameter('llm_view_topic', '/camera')  # VLM 用的彩色图
+        # YOLO 框叠加: 把检测框画在喂 VLM 的图上。关掉就回到纯相机图。
+        # 框的坐标是 /camera 原图像素, 和 llm_view_topic 不同源会错位 —— 两边默认都是 /camera。
+        self.declare_parameter('llm_draw_dets', True)
+        self.declare_parameter('llm_det_topic', '/yolo/detections')
+        self.declare_parameter('llm_det_timeout', 1.0)   # 框超时就不画, 避免贴着旧框说话
 
         self.v_max = float(self.get_parameter('v_max').value)
         self.a_max = float(self.get_parameter('a_max').value)
@@ -196,6 +223,7 @@ class Navigator(Node):
         self.goal_timeout = float(self.get_parameter('goal_timeout').value)
         self.heading_gate = float(self.get_parameter('heading_gate').value)
         self.turn_gain = float(self.get_parameter('turn_gain').value)
+        self.max_lead = float(self.get_parameter('max_lead').value)
         self.face_motion = bool(self.get_parameter('face_motion').value)
         # /goal_pose 里的四元数是否当作目标朝向 (RViz 的 2D Goal Pose 会给朝向)
         self.use_orientation = bool(self.get_parameter('use_orientation').value)
@@ -251,6 +279,16 @@ class Navigator(Node):
         if os.environ.get('LLM_WEIGHT', '1').strip().lower() in ('0', 'false', 'no', 'off'):
             acfg.llm_tie_deg = -1.0
         self.avoider = AvoidPlanner(acfg) if self.avoid_on else None
+        # ---- 局部栅格 + A* (grid_map.py) ----
+        # 只负责「大致往哪走」: 贴脸/窄缝/净空这些安全判据全在 AvoidPlanner 里,
+        # 地图算出方向, VFH 决定这一步到底安不安全 —— 两层各管一件事。
+        self.grid_on = bool(self.get_parameter('grid_on').value)
+        self.gmap = GridMap() if (self.avoid_on and self.grid_on) else None
+        self._gpath = None         # 最近一次 A* 折线 (世界坐标)
+        self._gplan_t = 0.0
+        self._dpt_t = 0.0        # 上一次把深度弧描进栅格的时刻 (s)        # 上次重新规划的时刻
+        self._gaim = None          # 本拍前视点 (世界坐标) / None
+        self._glog_t = 0.0
         self.plan = None           # 本周期避障决策 (None = 不介入)
         self.sectors = None        # 9 个扇区的最近距离 (m), inf = 空旷
         self._depth_t = 0.0
@@ -297,6 +335,11 @@ class Navigator(Node):
         self._view_t = 0.0
         self._vision_warm = False    # 视觉端预热过没有
         self._pic_combo = False      # 上一张图是不是「前视+雷达」拼图 (prompt 要照着说)
+        self._dets = []              # 最近一帧 YOLO 检测: (name, score, cx, cy, bw, bh), 原图像素坐标
+        self._det_t = 0.0
+        self._det_ttl = float(self.get_parameter('llm_det_timeout').value)
+        self._draw_dets_ok = bool(self.get_parameter('llm_draw_dets').value)
+        self._view_wh = None         # 最近一帧原图尺寸, 框是原图坐标, 缩放时要用
         self._llm_side = 0           # 上一条已打日志的意见, 免得重复刷屏
         self._llm_word = ''          # 上一条意见的词 (LEFT/RIGHT), 回喂给模型保持连续性
         self._llm_conf = 0.0         # 上一条意见的置信度, 只进日志
@@ -309,6 +352,13 @@ class Navigator(Node):
         self._detour_until = 0.0
         self._detour_last = 0        # 上次往哪边绕, 用来「失败就翻边」
         self._detour_fail = 0        # 同一趟行程里连续卡住几次
+        # 深度贴脸快速脱困: 见 on_timer 里同一行注释。_fg_since 是深度报警
+        # 开始计时的时刻, _fg_quick 表示本次脱困由它触发(不再等模型 6 s)。
+        self._fg_since = None
+        self._fg_x0 = 0.0
+        self._fg_y0 = 0.0
+        self._fg_yaw0 = 0.0
+        self._fg_quick = False
         self._last_stall_t = 0.0
         self._llm_ask_log_t = 0.0
         self._pos_hist = []          # (时间, x, y): 判断「说在走却挪不动」
@@ -339,6 +389,17 @@ class Navigator(Node):
                     qos_v = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT,
                                        history=HistoryPolicy.KEEP_LAST)
                     self.create_subscription(Image, self.llm_view_topic, self.on_view, qos_v)
+                    # YOLO 框: 和相机图同时喂给 VLM。没装 yolo_msgs 就静默跳过
+                    det_topic = str(self.get_parameter('llm_det_topic').value)
+                    if YoloDetectionArray is not None and self._draw_dets_ok:
+                        self.create_subscription(YoloDetectionArray, det_topic,
+                                                 self.on_detections, 10)
+                        self.get_logger().info(
+                            f'VLM 图上叠加 YOLO 框: 订阅 {det_topic}')
+                    elif not self._draw_dets_ok:
+                        self.get_logger().info('VLM 图不叠加检测框 (llm_draw_dets=false)')
+                    else:
+                        self.get_logger().info('yolo_msgs нет — VLM 图不带检测框')
                 elif vision:
                     self.get_logger().warn('VLM задан, но cv2 нет — работаю без картинки')
             else:
@@ -375,8 +436,60 @@ class Navigator(Node):
             return
         self._scan = (msg.ranges, msg.angle_min, msg.angle_increment)
         self._scan_t = time.time()
+        if self.gmap is not None:
+            # 雷达点直接进栅格: 450 束/帧 10 Hz, 是唯一能把「形状」记下来的地方
+            # (VFH 的 36 个扇区只记「这个方位现在多空」, 记不住 0.30 m 的死缝)。
+            self.gmap.apply_scan(msg.ranges, msg.angle_min, msg.angle_increment,
+                                 self.x, self.y, self.yaw.value, self._scan_t)
 
-    def _maybe_ask_llm(self, now, plan):
+    def _grid_aim(self, now, gx, gy, have_scan):
+        """局部栅格 + A*: 回本拍的前视点 (世界坐标); 没把握就 None。
+
+        A* 每 0.4 s 重算一次而不是每周期: 栅格本身 10 Hz 在长, 0.4 s 里路径偏差
+        到不了影响安全的程度, 省下的是每个周期 8000 次 A* 展开。
+        求不出前视点 (栅格空 / 算不出路 / 路径太短) 就返回 None,
+        调用方原样退回纯 VFH 行为 —— 这一层只会「多给一个方向」, 不会新增死法。
+        """
+        gm = self.gmap
+        if gm is None:
+            return None
+        # 深度兜底报「正前方 X 米有东西」-> 在那一点补一个粘滞点。
+        # 0.10 m 高的矮箱整个在雷达扫描面 (z=0.235 m) 之下, 雷达对它一无所见,
+        # 深度相机是它唯一的证人。补一次就够: sticky 内部对同一格不重复续命,
+        # 否则车一直贴着同一个箱子时那格永不销毁, 绕过去之后还在堵。
+        # 深度补点: 沿「深度看到它的那条弧」逐扇区投, 而不是投在车头正前方。
+        # 按车头投的横向误差 = d * sin(偏角): 箱子在视野边缘 25 度、1.4 m 处就偏
+        # 0.59 m, 而膨胀半径只有 0.25 m —— A* 眼里那仍是空地, 于是照样直冲。
+        # 投点按 0.5 s 一次, 每帧都投会在 8 s 的 sticky 存活期里拉出一条随车移动的
+        # 点轨迹, 把走过的路全糊死, 车自己就退不回来了。
+        if self.avoider is not None and (now - self._dpt_t) >= 0.50:
+            _arc = [(r, d) for r, d in getattr(self.avoider, 'depth_arc', ())
+                    if 0.10 < d < 1.90]
+            _dmin = min((d for _, d in _arc), default=None)
+            for _rel, _d in _arc:
+                if _dmin is None or _d > _dmin + 0.60:
+                    continue          # 只描矮障碍那一块; 远处的真墙雷达已经管了
+                self._dpt_t = now
+                _th = self.yaw.value + _rel
+                gm.sticky(self.x + _d * math.cos(_th),
+                          self.y + _d * math.sin(_th), now)
+        if now - self._gplan_t >= 0.4:
+            self._gplan_t = now
+            gm.rebuild(now)
+            self._gpath = gm.plan(self.x, self.y, gx, gy)
+            if now - self._glog_t >= 2.0:
+                self._glog_t = now
+                self.get_logger().info(
+                    '⛶ карта: точек %d, раздуто %d, путь %s'
+                    % (gm.n_occ, len(gm.blocked),
+                       ('%.1f м' % gm.path_len) if self._gpath else 'нет'))
+        if not self._gpath:
+            return None
+        aim = gm.lookahead(self._gpath, self.x, self.y)
+        self._gaim = aim
+        return aim
+
+    def _maybe_ask_llm(self, now, plan, force=''):
         """三个触发点, 都从「几何自己在犹豫」出发, 不是定时轮询。
 
         flap  2 秒内绕行换边 >= 2 次 —— 左右横跳, 几何选不出偏好;
@@ -404,6 +517,18 @@ class Navigator(Node):
         ahead = self.avoider.clearance(0.0, now, half_span=0.0)
 
         trig = '' if navigating else ('flap' if self.avoider.flap(now) else '')
+        if force == 'stall':
+            # 外部已经判定卡死(深度贴脸 + 1.5 s 没挪窝), 不再走 12 s 观察期。
+            # 但记账必须在这里做 —— 下面的 stall 分支靠 not trig 短路, 进不来。
+            if not trig:
+                trig = 'stall'
+                self._fg_quick = True
+                if now - self._last_stall_t > 20.0:
+                    self._detour_fail = 0
+                self._detour_fail += 1
+                self._last_stall_t = now
+                self._detour_until = now + 16.0
+                self._detour_heading = None
         # inf = 这一侧完全空旷, 恰恰是"两边都能过"的典型平局。原来要求
         # math.isfinite(left) and math.isfinite(right), 于是对称墙、空旷场
         # 两侧都是 inf 时 tie 永不成立 —— LLM 加权从来没被触发过。把 inf
@@ -527,6 +652,7 @@ class Navigator(Node):
         cv2.rectangle(img, (0, h - 16), (w, h), (0, 0, 0), -1)
         cv2.putText(img, bar, (6, h - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                     (255, 255, 255), 1, cv2.LINE_AA)
+        self._draw_dets(img)          # YOLO 框画在最上层, 不被底部黑条盖住
         return img
 
     def _radar_panel(self, now):
@@ -615,12 +741,61 @@ class Navigator(Node):
         except Exception:
             return None
 
+    def on_detections(self, msg):
+        """缓存最新一帧 YOLO 检测 (原图像素坐标)。"""
+        try:
+            dets = []
+            for d in msg.detections:
+                b = d.bbox
+                dets.append((str(d.class_name), float(d.score),
+                             float(b.center.position.x), float(b.center.position.y),
+                             float(b.size.x), float(b.size.y)))
+            self._dets = dets
+            self._det_t = time.time()
+        except Exception:
+            pass                      # 检测只是锦上添花
+
+    def _draw_dets(self, img):
+        """把 YOLO 框画到已缩放的 VLM 图上 (框是原图坐标, 按宽度比例缩)。
+
+        为什么要画在图上而不是写进 prompt: 同一张图里的位置关系是模型最擅长
+        读的东西, 而「框 3 在左下角」这种文字描述它大概率对不上号。类别名 + 置信度
+        直接印在框上, 它能一眼看出「那个框里是 person」。
+        """
+        if not self._dets or not self._draw_dets_ok:
+            return
+        if time.time() - self._det_t > self._det_ttl:
+            return                    # 旧框比无框更坏: 会把模型指到错的方向
+        wh = self._view_wh
+        if not wh or not wh[0]:
+            return
+        s = img.shape[1] / float(wh[0])
+        hh, ww = img.shape[:2]
+        for name, score, cx, cy, bw, bh in self._dets:
+            x1 = int(round((cx - bw / 2.0) * s))
+            y1 = int(round((cy - bh / 2.0) * s))
+            x2 = int(round((cx + bw / 2.0) * s))
+            y2 = int(round((cy + bh / 2.0) * s))
+            x1 = max(0, min(ww - 1, x1))
+            x2 = max(0, min(ww - 1, x2))
+            y1 = max(0, min(hh - 1, y1))
+            y2 = max(0, min(hh - 1, y2))
+            if x2 - x1 < 4 or y2 - y1 < 4:
+                continue
+            col = (60, 60, 255) if name == 'person' else (60, 255, 60)
+            cv2.rectangle(img, (x1, y1), (x2, y2), col, 1)
+            tag = '%s %.2f' % (name, score)
+            ty = y1 - 4 if y1 > 13 else y2 + 12
+            cv2.putText(img, tag, (x1, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.36, col, 1, cv2.LINE_AA)
+
     def on_view(self, msg):
         """彩色相机 -> 内存里最新一帧。编码推迟到真要问 VLM 的时候:
         标注要有目标方位和净空, 那是主循环才知道的东西, 这里拿不到。"""
         try:
             arr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             h, w = arr.shape[:2]
+            self._view_wh = (w, h)   # 原图尺寸: YOLO 框是原图坐标
             if w > 448:              # 实测 320/448/640 的延迟几乎一样 (0.85-0.91 s),
                 s = 448.0 / w        # 瓶颈是输出 token 数不是图像; 448 够看清又省带宽
                 arr = cv2.resize(arr, (int(w * s), int(h * s)))
@@ -753,6 +928,16 @@ class Navigator(Node):
     def on_timer(self):
         if not self.got_joints:
             return
+        # 用**真实**周期, 不是 1/hz。on_timer 里挂着 LLM、栅格、日志, 实际频率常年
+        # 低于 50 Hz, 而位移是按 dt 累积的 —— 频率掉多少, 速度就按比例掉多少。
+        # 实测 0.30 m/s 上不去 (设定 0.5) 就是这个原因: 指令每次只挪 v*(1/50),
+        # 每秒却只跑 30-35 次。改成真实 dt 后同一个 v 才是真的 m/s。
+        _t_now = time.monotonic()
+        dt = _t_now - getattr(self, '_tick_t', _t_now - self.dt)
+        if dt <= 1e-4 or dt > 0.20:
+            dt = self.dt
+        self._tick_t = _t_now
+        self._tick_n = getattr(self, '_tick_n', 0) + 1
         # 定位断流保护: 先暂停推进等恢复 (机器人自然停住), 久不恢复才放弃目标
         silent = time.time() - self._last_joint_t
         if silent > STALE_ABORT:
@@ -845,16 +1030,61 @@ class Navigator(Node):
                             f'уверенность {conf_now:.2f})')
                 elif self._llm_side:
                     self._llm_side = 0      # 意见过期了, 下次新的再打一遍日志
+                # 地图先算「该往哪走」: 把 A* 折线上车前方 1.5 m 的点当本拍方向。
+                # 没有前视点 (栅格空 / 算不出路) 时 aim=None, 行为与纯 VFH 完全一致。
+                aim = self._grid_aim(now, gx, gy, have_scan)
                 plan = self.avoider.update(self.x, self.y, self.yaw.value,
                                            (gx, gy), self.sectors, now,
-                                           scan=self._scan if have_scan else None)
-                self._maybe_ask_llm(now, plan)
+                                           scan=self._scan if have_scan else None,
+                                           aim=aim)
+                # ---- 深度贴脸快速脱困 ----
+                # 矮障碍(0.10 m 高)整个在雷达扫描面之下(雷达 z=0.235), 几何判
+                # 「前方通畅」, 只有深度相机看得见。原来全靠二级 stall 判据
+                # (12 s 挪不动 0.15 m)才反应 —— m01262 实测: 994 s 车就顶住了,
+                # 1007 s 才判出来, 白等 12.1 s, 而这段恰好压在起点第一段。
+                # 深度报 0.50 m 以内、车身 1.5 s 没挪窝, 就直接当卡死处理:
+                # 走的是同一套 stall 通道(照样问模型、照样第一轮优先用它的方向),
+                # 只是不再等那 12 s —— 询问次数一次都没少。
+                _force = ''
+                _fg = self.avoider.front_gap
+                _fg_ok = (_fg is not None and math.isfinite(_fg)
+                          and _fg < 0.55)
+                if (plan.advance and plan.state != HOLD and dist > 0.80
+                        and _fg_ok):
+                    if self._fg_since is None:
+                        self._fg_since = now
+                        self._fg_x0, self._fg_y0 = self.x, self.y
+                        self._fg_yaw0 = self.yaw.value
+                    elif (math.hypot(self.x - self._fg_x0,
+                                     self.y - self._fg_y0) > 0.10
+                          or abs(wrap_pi(self.yaw.value
+                                         - self._fg_yaw0)) > 0.35):
+                        # 还在动: 起点跟着车走, 否则一次小位移就把计时器
+                        # 永久废掉 —— 第一版就栽在这里, 起点钉死在贴脸那一刻,
+                        # 车挪了 0.17 m 之后 hypot 永远 > 0.10, 一次都没触发,
+                        # 又退回 12 s 的二级判据 (ab5 第二趟 62.9 s)。
+                        self._fg_since = now
+                        self._fg_x0, self._fg_y0 = self.x, self.y
+                        self._fg_yaw0 = self.yaw.value
+                    elif now - self._fg_since >= 1.5:
+                        _force = 'stall'
+                elif _fg is not None and _fg > 0.75:
+                    # 只有「明确远离」才清零: 深度在 0.5-0.75 之间抖动时保持
+                    # 计时, 不然贴脸读数一掉就又从头数 1.5 s。
+                    self._fg_since = None
+                self._maybe_ask_llm(now, plan, force=_force)
                 # 强制绕行: 卡死且模型已经指出往哪边, 就在这一层直接接管航向。
                 # 几何算不出这一步 —— 顶住车的那个矮箱子整个在雷达扫描面之下,
                 # 它的 _feasible 对前方每一度都判「通畅」, 永远只给出笔直一条线,
                 # 所以模型的方向必须在这里落地, 否则它答一百次车也纹丝不动。
                 if now >= self._detour_until:
                     self._detour_heading = None     # 窗口结束, 交回几何
+                    self._fg_quick = False
+                elif aim is not None:
+                    # 地图已经给出绕行方向了, 让「90 度垂直侧移」退居二线:
+                    # 两套绕行同时作用会互相拆台 (地图往左、强制绕行往右),
+                    # 车就在原地左右甩头。A* 真没路时 aim=None, 这一层照旧接管。
+                    self._detour_heading = None
                 elif (self._detour_heading is None
                         and plan.advance and plan.state != HOLD):
                     # 锁定一个**绝对**绕行角, 定了就不再改。三条教训都来自实测:
@@ -868,8 +1098,11 @@ class Navigator(Node):
                     s = 0
                     if self._detour_fail <= 1 and self._llm_side:
                         s = self._llm_side
-                    elif self._detour_fail <= 1 and now < self._last_stall_t + 6.0:
+                    elif (self._detour_fail <= 1 and not self._fg_quick
+                          and now < self._last_stall_t + 6.0):
                         s = 0       # 第一轮先等模型 6 秒, 它答了就用它的
+                        # 深度快速判据触发时不走这条 —— 车已经顶在障碍上,
+                        # 再等 6 s 等于把省下的 12 s 又还回去一半。
                     if not s:
                         lc = self.avoider.clearance(60.0, now)
                         rc = self.avoider.clearance(-60.0, now)
@@ -971,17 +1204,22 @@ class Navigator(Node):
         hold = plan is not None and plan.state == HOLD
         no_adv = plan is not None and not plan.advance
 
+        # 门限分两档: 远离目标时允许大角度边走边转 (弧线), 进到终点跟前再收紧 ——
+        # 近场划弧会把 2 cm 的到点精度做丢, 那里该老实停下来对齐。
+        gate = self.heading_gate if dist_cmd >= NEAR_GATE_DIST \
+            else min(self.heading_gate, NEAR_GATE)
+
         if hold:
             # 视野内处处都太窄 (被围死/走廊尽头): 指令收回到实测位姿, 位置伺服就地
             # 刹住, 原地等着, 不硬挤 —— 挤过去就是撞。
             phase = 'стоп: препятствие вплотную'
             self.cmd_x, self.cmd_y = self.x, self.y
             self.cmd_yaw = self.yaw.value
-        elif not arrived_xy and (abs(err) > self.heading_gate or no_adv):
+        elif not arrived_xy and (abs(err) > gate or no_adv):
             # 车头偏得太多, 或避障要求「先转头观察」: 原地转向, 期间不前进
             phase = f'поворот (отклонение {math.degrees(err):+.0f} deg)'
             w = min(self.w_max, max(math.sqrt(4.0 * abs(err)), 0.05))
-            self.cmd_yaw += math.copysign(min(w * self.dt, abs(err)), err)
+            self.cmd_yaw += math.copysign(min(w * dt, abs(err)), err)
         elif not arrived_xy:
             # 已对准: 沿车头直行, 边走边小角度修正 (车头始终朝运动方向)
             phase = 'едем'
@@ -991,12 +1229,22 @@ class Navigator(Node):
                 # 固定 0.18 m/s 会以恒定速度冲过目标点, 在终点周围转圈 (踩过这个坑)。
                 v = min(v, max(0.06, 0.6 * dist_cmd))
             if plan is not None and plan.state == DODGE:
-                v = min(v, 0.30)                    # 绕行降速, 留出反应余量
-            step = min(v * self.dt, dist_cmd)       # 指令不越过目标
+                # 绕行限速按净空自适应。原来是死 0.30, 而日志实测(mixed 0,8)显示:
+                # 直行段伺服能稳稳跑 0.50 (指令-实测偏差只有 2 cm), 绕行段却被这一句
+                # 钉在 0.30, 全程一半时间在爬 —— 8 m 走 32 s 里至少 8 s 是白等的。
+                _cl = plan.clear if math.isfinite(plan.clear) else 9.0
+                _vcap = 0.30 + 0.30 * max(0.0, min(1.0, (_cl - 0.60) / 0.90))
+                v = min(v, _vcap)                   # 净空 0.6 m -> 0.30, 1.5 m 以上 -> 0.60
+            # 偏差越大越慢, 但不停车 —— 这就是「边走边转」与原来「停-转-停」的差别。
+            # 平方衰减 + 下限 0.45: 门前 34 度偏角时还剩 22 cm/s, 依旧能转过去。
+            # 基准用固定的 1.0 rad 而不是 gate: gate 收小时 (近场 0.15) 否则会把
+            # 10 度的正常修正也砍掉一半速度
+            v *= max(0.45, 1.0 - (abs(err) / 1.0) ** 2)
+            step = min(v * dt, dist_cmd)            # 指令不越过目标
             self.cmd_x += math.cos(self.cmd_yaw) * step
             self.cmd_y += math.sin(self.cmd_yaw) * step
             w = max(-self.w_max, min(self.w_max, self.turn_gain * err))
-            self.cmd_yaw += w * self.dt
+            self.cmd_yaw += w * dt
         else:
             phase = 'на месте'
 
@@ -1007,15 +1255,15 @@ class Navigator(Node):
             arrived_yaw = abs(yerr) <= self.yaw_eps
             if not arrived_yaw:
                 w = min(self.w_max, max(math.sqrt(4.0 * abs(yerr)), 0.05))
-                self.cmd_yaw += math.copysign(min(w * self.dt, abs(yerr)), yerr)
+                self.cmd_yaw += math.copysign(min(w * dt, abs(yerr)), yerr)
                 phase = f'доворот (отклонение {math.degrees(yerr):+.0f} deg)'
             else:
                 self.cmd_yaw = tgt
 
         # 指令不得超前实测太多: 伺服滞后/定位断流时, 超前量就是会冲过头的距离
         lead = math.hypot(self.cmd_x - self.x, self.cmd_y - self.y)
-        if lead > MAX_LEAD:
-            k = MAX_LEAD / lead
+        if lead > self.max_lead:
+            k = self.max_lead / lead
             self.cmd_x = self.x + (self.cmd_x - self.x) * k
             self.cmd_y = self.y + (self.cmd_y - self.y) * k
         lead_yaw = wrap_pi(self.cmd_yaw - self.yaw.value)
@@ -1079,6 +1327,11 @@ class Navigator(Node):
 
         # ---- 1 Hz 进度日志 ----
         t = time.time()
+        if t - getattr(self, '_tick_stat_t', 0.0) >= 5.0:
+            self._tick_stat_t = t
+            self._tick_n = getattr(self, '_tick_n', 0)
+            self.get_logger().info(f'цикл управления {self._tick_n / 5.0:.1f} Гц')
+            self._tick_n = 0
         if t - self._status_log_t >= 1.0:
             self._status_log_t = t
             speed = min(self.v_max, max(math.sqrt(2.0 * self.a_max * dist), 0.03))

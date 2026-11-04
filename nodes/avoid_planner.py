@@ -95,6 +95,9 @@ class Config:
                                 # HOLD 只转不走, 原地钉了 90 s。
     step_deg: float = 10.0    # 方向搜索步长 (deg)
     fuse_depth: bool = False  # 有雷达时是否仍把深度图并进记忆; 默认关, 理由见 _merge_depth
+    depth_reach: float = 1.80  # 深度「看见矮物」就算数的距离 (m)。原来是 safe_dist+margin+lookahead
+                              # = 1.40, 车 0.5 m/s 走过去只有 2.8 s, 而绕开 0.8 m 宽的箱子要横移
+                              # 0.7 m (30 度偏角下 = 1.2 m 路程, 2.4 s) —— 刚好擦着撞上。1.8 m 留 3.6 s。
     scan_max: float = 9.0     # 激光雷达读数超过它就算「这一边空旷」(m)。
                               # 量程 12 m, 留 3 m 余量, 免得远处的墙被当成近处障碍。
     llm_ttl: float = 8.0      # 外部(LLM)意见有效期 (s)。4 s 实测不够: 车进了 commit
@@ -141,6 +144,7 @@ class AvoidPlanner:
         # 正前方雷达看不见的低矮障碍 (箱子/台阶/桌腿) 的最近距离; None=没看到
         self._depth_front = None
         self._depth_front_t = 0.0
+        self._depth_arc = ()       # ((相对车头方位 rad, 距离 m), ...) 左正右负, ROS 约定
         self._goal_dir = 0.0       # 本拍目标方位, 深度否决要锚在它上面 (见 _strict)
         # 正前方净空 (m), inf=空旷。上层据此决定「要不要报警」—— 判堵用的 1.40 m
         # 是提前打方向的量, 拿它当警报线会吓人; 真正会撞的线是 safe_dist。
@@ -237,7 +241,7 @@ class AvoidPlanner:
         self.pref_src = ''
 
     # ---------------- 主入口 ----------------
-    def update(self, x, y, yaw, goal, sectors, now, speed=0.0, scan=None):
+    def update(self, x, y, yaw, goal, sectors, now, speed=0.0, scan=None, aim=None):
         """每周期调用一次, 返回本周期车头该指哪儿、能不能往前挪。
 
         x, y, yaw : 实测位姿 (yaw 弧度)
@@ -246,6 +250,9 @@ class AvoidPlanner:
         speed     : 当前速度 (m/s), 目前只用于日志
         scan      : 激光雷达一帧 (ranges, angle_min, angle_increment)。给了就用它 ——
                     360 度同一时刻全覆盖, 不再需要靠转头补盲区
+        aim       : 前视点 (ax, ay)。给了就用它代替最终目标算「本拍往哪儿走」——
+                    局部栅格 (grid_map.py) 已经把「必须先背离目标绕远」这种走法
+                    算出来了, 这里只负责朝下一段走; 到点判定仍然用 goal
         """
         c = self.cfg
         self.block_why = ''
@@ -271,15 +278,27 @@ class AvoidPlanner:
             _vals = [v for v in sec if math.isfinite(v)]
             if _vals:
                 _d = min(_vals)
-                if _d < c.safe_dist + c.margin + c.lookahead:
+                if _d < c.depth_reach:
                     self._depth_front = _d
                     self._depth_front_t = now
+                    # 整条弧都记下来, 不只最近那一点: 0.8 m 宽的矮箱在 1.4 m 处横跨
+                    # 4~5 个扇区, 只投一根柱子的话 A* 从旁边 0.3 m 就能穿过去; 全投
+                    # 出来才连成一道真正的墙。
+                    # 方位换算: 扇区从左到右编号 (a0 = -hfov/2, 即最左), 而 ROS 的
+                    # yaw 正方向也是左 -> 车头相对角 rel = -a_i = hfov/2 - step*(i+0.5)。
+                    _n = len(sec)
+                    _step = c.hfov / _n
+                    self._depth_arc = tuple(
+                        (c.hfov * 0.5 - _step * (i + 0.5), float(sec[i]))
+                        for i in range(_n)
+                        if math.isfinite(sec[i]) and sec[i] < c.depth_reach)
         # 看到后记忆保留 2.5 s: 深度只有 +/-30 度视野, 车一转头箱子就出画。
         # 立刻清空的话, 车会马上「转回去看一眼」-> 又看到 -> 再转走, 左右摆头一步不挪
         # (这个坑在 look_hold 上也踩过一次)。2.5 s 足够以 0.5 m/s 走出 1.2 m 绕开。
         if self._depth_front is not None and now - self._depth_front_t > 2.5:
             self._depth_front = None
             self._depth_front_t = 0.0
+            self._depth_arc = ()
         # 正前方净空: 深度优先 (雷达从矮物头顶飞过, 看不见它们), 没有深度就退回雷达。
         self.front_gap = INF
         if self._depth_front is not None:
@@ -309,6 +328,14 @@ class AvoidPlanner:
         gx, gy = goal
         dist_goal = math.hypot(gx - x, gy - y)
         goal_dir = math.atan2(gy - y, gx - x) if dist_goal > 1e-9 else yaw
+        if aim is not None:
+            # 前视点就在车旁 1.5 m 的路径上: 用它当本拍方向, go_limit(100 度)
+            # 就不再是问题 —— 「先向左后方绕」这一刻的偏差是 0, 不是 94 度。
+            # 下面的 _feasible/_strict/_narrow 仍然按真实雷达/深度算,
+            # 所以地图只能改「往哪边走」, 改不动「这一步安不安全」。
+            ax, ay = aim
+            if math.hypot(ax - x, ay - y) > 1e-6:
+                goal_dir = math.atan2(ay - y, ax - x)
         self._goal_dir = goal_dir
 
         near_now = self._mark(yaw, now)

@@ -146,4 +146,12 @@ if [ "$MODE" = avoid ]; then
     exec ros2 run obstacle_avoider obstacle_avoider
 fi
 
+# 导航模式下也让 VLM 图带上 YOLO 检测框。必须整个 source, 不能只加 PYTHONPATH:
+# rosidl 的消息类型除了 python 类, 还要 libyolo_msgs__rosidl_typesupport_fastrtps_c.so
+# 这类 .so, 路径在 AMENT_PREFIX_PATH/LD_LIBRARY_PATH 里, source 才会设。
+# 这里用的是 yolo_ros2_ws/install 前缀, 不激活 .venv, 所以不会和导航的 numpy 撞车。
+if [ -f "$ROOT/yolo_ros2_ws/install/setup.bash" ]; then
+    source "$ROOT/yolo_ros2_ws/install/setup.bash"
+fi
+
 exec python3 -u "$ROOT/nodes/navigate_to_pose.py" "$@"
