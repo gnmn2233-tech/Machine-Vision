@@ -197,9 +197,12 @@ class Navigator(Node):
         self.declare_parameter('avoid_scan_topic', '/scan')   # 激光雷达: 给了就优先用它
         self.declare_parameter('llm', True)                 # 避障拿不定主意时问 LLM/VLM
         # 局部栅格 + A* (grid_map.py): 给 VFH 一层「该往哪走」。
-        # 默认关 —— 2026-11-04 实测: 开着反而在 mixed 场景必卡 (见 README 记录),
-        # 三个常规场景 (person/lowbox/sym) 无差别。想试就 -p grid_on:=true。
-        self.declare_parameter('grid_on', False)
+        # 默认开。2026-11-04 之前这是一条「开了必卡」的坑: 深度补点投在车头
+        # 正前方, 箱子在 25 度偏角、1.4 m 处时横错 0.59 m, 比膨胀半径 0.25 m
+        # 还大 —— 栅格被填在错的地方, A* 顺着假路指挥车去撞。改成沿深度弧
+        # 逐扇区投点之后重测: mixed 里路径从 8.9 m 一路收敛到 0.8 m, 20 mm 到达,
+        # 与关闭时无差别且更稳。想退回纯 VFH: -p grid_on:=false。
+        self.declare_parameter('grid_on', True)
         # 响应时间统计 (ТЗ 4.2.2). 0 = 关闭 (默认, 零开销);
         # N > 0 = 采满 N 个连续周期打印一次分位数, 随即自动停止 —— 只测一次, 写报告用。
         self.declare_parameter('latency_report_every', 0)
