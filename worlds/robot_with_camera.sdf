@@ -427,17 +427,17 @@
       <self_collide>false</self_collide>
     </model>
     <include>
-      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
+      <uri>model://prius hybrid</uri>
       <name>prius_hybrid</name>
       <pose>-4.571428298949253 4.7399296760558824 0.012649738109208861 -3.3783754486876425e-08 2.3402624556218585e-12 1.5707963267948932</pose>
     </include>
     <include>
-      <uri>file:///root/gz_ros/mod/walking person</uri>
+      <uri>model://walking person</uri>
       <name>person_walking</name>
       <pose>0.0059126601554453373 4.6140275001525879 0.099999235505769002 0 0 1.5707963267948963</pose>
     </include>
     <include>
-      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
+      <uri>model://prius hybrid</uri>
       <name>prius_hybrid_0</name>
       <pose>3.2301868175652202 4.2403415756279843 0.012649851850239396 -3.3860017763917921e-08 2.3385838203889359e-12 8.9350110937866237e-08</pose>
     </include>

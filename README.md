@@ -76,6 +76,15 @@ sudo apt install ros-jazzy-ros-gz ros-jazzy-ros-gz-interfaces ros-jazzy-rviz2 ro
 pip3 install -r config/requirements.txt      # 报 externally-managed-environment 时加 --break-system-packages
 ```
 
+YOLO 检测跑在独立虚拟环境里（`.venv/` 不入库，需要自己建一次）：
+
+```bash
+cd yolo_ros2_ws && python3 -m venv .venv \
+  && .venv/bin/pip install -r src/yolo_ros/requirements.txt
+```
+
+没有这个 `.venv` 时 `simulation.sh` 会跳过 YOLO，导航与避障仍然正常，只是没有视觉检测结果。
+
 ### 2. 编译两个工作区
 
 ```bash
@@ -99,6 +108,11 @@ bash simulation.sh        # 一键：仿真 + 键盘 + 话题桥 + YOLO + RViz +
 bash run.sh 0 8           # 另开终端：导航到 (0, 8)
 bash run.sh stop          # 收工：导航 / 桥 / 仿真 / YOLO / RViz 一起关
 ```
+
+> **LLM 顾问（可选）**：`run.sh` 默认 `LLM_ON=1`，连本地 LM Studio 的
+> `http://127.0.0.1:1234/v1`（模型 `qwen/qwen3.5-9b`，在 LM Studio 里加载该模型后打开
+> Local Server 即可）。没装不影响导航与避障，但**红绿灯场景会失去判灯能力**（车不会在红灯前停）。
+> 要关掉用 `LLM_ON=0 bash run.sh 0 9`，换地址/模型用 `LLM_LOCAL_URL=... LLM_LOCAL_MODEL=...`。
 
 根目录只有两个脚本，其余都是子命令（脚本都自定位仓库根，任意目录执行都行）：
 

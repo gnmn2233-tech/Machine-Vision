@@ -76,7 +76,7 @@
             <diffuse>0.70 0.66 0.62 1</diffuse>
             <pbr>
               <metal>
-                <albedo_map>file:///root/gz_ros/mod/wall_textures/brick_diffuse.jpg</albedo_map>
+                <albedo_map>model://wall_textures/brick_diffuse.jpg</albedo_map>
                 <roughness>0.9</roughness>
                 <metalness>0.0</metalness>
               </metal>

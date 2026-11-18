@@ -6,7 +6,7 @@
     y=3.6  wall      1.0 x 0.4 x 0.60  (x=1.2, 右侧封住, 走左)
     y=5.0  prius     2.1 m 长, 横置在 x=-1.5 (左侧封住, 走右)
     y=6.6  行人       站在 x=1.5 (右侧封住, 回到中线)
-  行人/车辆模型与 person.sdf 同源, 用绝对 file:// 路径 (mod/ 目录名带空格, model:// 不可靠)。
+  行人/车辆模型与 person.sdf 同源, 走 GZ_SIM_RESOURCE_PATH 下的 model:// 引用 (目录名带空格的按字面写, 不转 %20)。
 -->
 <sdf version='1.10'>
   <world name='default'>
@@ -86,7 +86,7 @@
             <diffuse>0.72 0.60 0.46 1</diffuse>
             <pbr>
               <metal>
-                <albedo_map>file:///root/gz_ros/mod/wall_textures/wood_plank.jpg</albedo_map>
+                <albedo_map>model://wall_textures/wood_plank.jpg</albedo_map>
                 <roughness>0.85</roughness>
                 <metalness>0.0</metalness>
               </metal>
@@ -107,7 +107,7 @@
             <diffuse>0.70 0.66 0.62 1</diffuse>
             <pbr>
               <metal>
-                <albedo_map>file:///root/gz_ros/mod/wall_textures/brick_diffuse.jpg</albedo_map>
+                <albedo_map>model://wall_textures/brick_diffuse.jpg</albedo_map>
                 <roughness>0.9</roughness>
                 <metalness>0.0</metalness>
               </metal>
@@ -117,12 +117,12 @@
       </link>
     </model>
     <include>
-      <uri>file:///root/gz_ros/mod/prius hybrid</uri>
+      <uri>model://prius hybrid</uri>
       <name>car_left</name>
       <pose>1.8 5.2 0.0126 0 0 1.5707963267948963</pose>
     </include>
     <include>
-      <uri>file:///root/gz_ros/mod/walking person</uri>
+      <uri>model://walking person</uri>
       <name>person_right</name>
       <pose>1.4 6.9 0.099999235505769002 0 0 0</pose>
     </include>
