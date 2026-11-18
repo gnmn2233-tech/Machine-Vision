@@ -342,6 +342,9 @@ class Navigator(Node):
         self._det_t = 0.0
         self._det_ttl = float(self.get_parameter('llm_det_timeout').value)
         self._draw_dets_ok = bool(self.get_parameter('llm_draw_dets').value)
+        self._det_sub = False         # YOLO 检测是否已订阅 (语义刹车的输入, 与 LLM 无关)
+        self.declare_parameter('yolo_img_w', 640)
+        self.cam_w = int(self.get_parameter('yolo_img_w').value)   # 检测框所在原图宽度 (px)
         self._view_wh = None         # 最近一帧原图尺寸, 框是原图坐标, 缩放时要用
         self._llm_side = 0           # 上一条已打日志的意见, 免得重复刷屏
         self._llm_word = ''          # 上一条意见的词 (LEFT/RIGHT), 回喂给模型保持连续性
@@ -393,22 +396,40 @@ class Navigator(Node):
                                        history=HistoryPolicy.KEEP_LAST)
                     self.create_subscription(Image, self.llm_view_topic, self.on_view, qos_v)
                     # YOLO 框: 和相机图同时喂给 VLM。没装 yolo_msgs 就静默跳过
-                    det_topic = str(self.get_parameter('llm_det_topic').value)
-                    if YoloDetectionArray is not None and self._draw_dets_ok:
-                        self.create_subscription(YoloDetectionArray, det_topic,
-                                                 self.on_detections, 10)
-                        self.get_logger().info(
-                            f'VLM 图上叠加 YOLO 框: 订阅 {det_topic}')
-                    elif not self._draw_dets_ok:
-                        self.get_logger().info('VLM 图不叠加检测框 (llm_draw_dets=false)')
-                    else:
-                        self.get_logger().info('yolo_msgs нет — VLM 图不带检测框')
+                    self._ensure_det_sub()
                 elif vision:
                     self.get_logger().warn('VLM задан, но cv2 нет — работаю без картинки')
             else:
                 self.get_logger().info('LLM-советник выключен (LLM_ON=0)')
         elif self.avoid_on and self.llm_wanted:
             self.get_logger().warn(f'LLM-советник недоступен ({LLM_ERR}), только геометрия')
+
+        # 语义感知独立于 LLM: 关掉 LLM 也照样知道画面里有没有人
+        self._ensure_det_sub()
+
+        # ---- 信号灯通道 (演示用) ----
+        # 这是「语义否决几何」的最小实现: 几何看到前方畅通, 会毫不犹豫往前开;
+        # 模型看到红灯, 说「停」, 于是车停在停止线前。没有这个通道, light
+        # 场景里车会一路开过去 —— 路是真的通的, 错的不是几何, 是它不知道交通规则。
+        self.declare_parameter('traffic_mode', False)
+        # 停止线: light.sdf 里 stop_line 摆在 y=4.0。红灯时车要先开到线前再停,
+        # 不能一看到红灯就杵在起点 —— 那演示不出「停在线后」。
+        # gap = 车中心离线还有多远就踩停。实测(相机离地 0.28 m、60 度视场):
+        # 车心到 y=3.3 时, 红灯球还在画面里(画面顶部), 再往前就顶出画面 ->
+        # 模型只会回「看不到」, 于是永远等不到绿灯。所以 gap 不能太小。
+        self.declare_parameter('traffic_line_y', 4.0)
+        self.declare_parameter('traffic_line_gap', 0.60)
+        self.traffic_on = bool(self.get_parameter('traffic_mode').value)
+        self.traffic_line_y = float(self.get_parameter('traffic_line_y').value)
+        self.traffic_line_gap = float(self.get_parameter('traffic_line_gap').value)
+        self._cam_img = None
+        self._cam_t = 0.0
+        self._traffic_stop = False
+        self._traffic_txt = ''
+        if self.traffic_on:
+            self._ensure_cam_sub()
+            threading.Thread(target=self._light_loop, daemon=True).start()
+            self.get_logger().info('信号灯语义: 每 3 s 问一次模型, 红灯 -> 停车')
 
         self.create_timer(self.dt, self.on_timer)
 
@@ -758,6 +779,159 @@ class Navigator(Node):
         except Exception:
             pass                      # 检测只是锦上添花
 
+    def _ensure_cam_sub(self):
+        """订阅彩色相机并存最新一帧 —— 供信号灯通道用 (与 VLM 的订阅互不依赖)。"""
+        try:
+            from sensor_msgs.msg import Image as RosImage
+            from rclpy.qos import (QoSProfile, ReliabilityPolicy, HistoryPolicy)
+            q = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT,
+                           history=HistoryPolicy.KEEP_LAST)
+            self.create_subscription(RosImage, self.llm_view_topic, self._on_cam, q)
+        except Exception as exc:
+            self.get_logger().warn(f'相机订阅失败: {exc}')
+
+    def _on_cam(self, msg):
+        try:
+            self._cam_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self._cam_t = time.time()
+        except Exception:
+            pass
+
+    def _need_line_stop(self, gx, gy):
+        """红灯时该不该现在踩停: 到了停止线前才停, 没到就继续往前开。
+
+        判据用世界 y 坐标 —— 本场景线在 +y 方向(路灯杆与停止线都在车前),
+        车从 y=0 出发朝 +y 走, 所以「车心 >= 线 - gap」就是压到线前了。
+        目标若不在线的对面(gy <= 线), 这条线和本次行车无关, 红灯照旧立刻停。
+        没配线(traffic_line_y=0 或 gap<=0)时退回老行为: 红灯立刻停。
+        """
+        if self.traffic_line_gap <= 0.0 or self.traffic_line_y == 0.0:
+            return True
+        if gy <= self.traffic_line_y:
+            return True
+        return self.y >= self.traffic_line_y - self.traffic_line_gap
+
+    def _light_loop(self):
+        """后台每 3 s 问一次模型「现在能过吗」, 结论写进 _traffic_stop。
+
+        为什么是 3 s 而不是每帧: 9B 带图一次 0.9-3 s, 每帧问会把控制环拖死。
+        信号灯是慢变量 (几秒才变一次), 3 s 足够。
+        为什么只在开启时才跑: 这是演示通道, 平时开着一来费电二来可能被误判拦住。
+        """
+        import base64
+        import json as _json
+        import urllib.request
+        url = os.environ.get('LLM_VLM_URL', 'http://127.0.0.1:1234/v1').rstrip('/') + '/chat/completions'
+        model = os.environ.get('LLM_VLM_MODEL', 'qwen/qwen3.5-9b')
+        # 只让它吐两个字。原来问「先答颜色再答通过/停止」, 模型答的是
+        # 「从图中看, 信号灯区域是灰色的, 没有显示红、黄、绿等明确颜色」——
+        # 这句话里红和绿都有, 关键词匹配直接判成「绿灯」放行, 车就开走了。
+        # 让输出变成封闭二选一, 歧义就没了。
+        # 必须给出「看不到」这个出口。实测模型在画面里根本没有信号灯时不会说
+        # 看不见, 而是硬猜一个「红灯」—— 车就这么被一个凭空的结论拦住。
+        prompt = ('图里是路口的信号灯。只回答三个词之一: 红灯 / 绿灯 / 看不到。不要解释。')
+        # 先问一次再睡: 车此时还在起点、信号灯就在画面正中 (实测截图可见),
+        # 等 3 秒再问时车已经开出去一米多, 画面里的灯可能已经被裁掉一半。
+        while rclpy.ok():
+            img = self._cam_img
+            if img is None or time.time() - self._cam_t > 2.0:
+                continue
+            try:
+                ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if not ok:
+                    continue
+                if os.environ.get('TRAFFIC_DEBUG'):
+                    try:
+                        open('/tmp/traffic_debug.jpg', 'wb').write(buf.tobytes())
+                    except Exception:
+                        pass
+                b64 = base64.b64encode(buf.tobytes()).decode()
+                body = _json.dumps({
+                    'model': model, 'temperature': 0.1, 'max_tokens': 24,
+                    'reasoning_effort': 'none',
+                    'messages': [{'role': 'user', 'content': [
+                        {'type': 'text', 'text': prompt},
+                        {'type': 'image_url',
+                         'image_url': {'url': 'data:image/jpeg;base64,' + b64}}]}]}).encode()
+                req = urllib.request.Request(url, data=body,
+                                             headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    txt = _json.loads(r.read())['choices'][0]['message']['content']
+                txt = str(txt).strip().replace('\n', ' ')
+                # 三态解析: 只认明确的红/绿。
+                # 原来把「提到 stop 就停车、否则放行」当规则, 结果车一转头看不到灯,
+                # 模型答「图中未显示信号灯的颜色」→ 被判放行 → 车直接开走了。
+                # 看不到 ≠ 可以走, 这时应该保持上一次的结论。
+                # 只看开头两个字符, 且必须是断言而不是描述。
+                # 「没有显示红、黄、绿」这种句子在正文里同时出现红和绿, 用 in 判断
+                # 必然出错 —— 实测就是这样把红灯读成放行的。
+                head = txt.strip()[:3].lower()
+                if head.startswith('红') or head.startswith('red'):
+                    stop = True
+                elif head.startswith('绿') or head.startswith('green'):
+                    stop = False
+                elif '看不到' in txt or '没有' in txt or '无' in txt:
+                    time.sleep(3.0)
+                    continue                      # 明确看不见: 维持原判
+                else:
+                    time.sleep(3.0)
+                    continue                      # 看不清: 维持原判
+                if stop != self._traffic_stop:
+                    self.get_logger().info(
+                        f'信号灯: {txt[:36]} -> {"停车" if stop else "放行"}')
+                self._traffic_stop = stop
+                self._traffic_txt = txt
+            except Exception:
+                pass
+            time.sleep(3.0)
+
+    def _ensure_det_sub(self):
+        """订阅 YOLO 检测 —— 语义刹车的输入, 与 LLM 开关无关。
+
+        原先这个订阅写在「LLM 视觉模式」的分支里, 于是关掉 LLM 就连带关掉了语义
+        感知。两件事本来独立: 一个要「画面里是什么」, 一个要「该往哪边绕」。
+        """
+        if self._det_sub or YoloDetectionArray is None:
+            return
+        try:
+            det_topic = str(self.get_parameter('llm_det_topic').value)
+            self.create_subscription(YoloDetectionArray, det_topic, self.on_detections, 10)
+            self._det_sub = True
+            self.get_logger().info(
+                f'语义感知: 订阅 {det_topic} — 人周围多留 0.80 m 净空')
+        except Exception as exc:
+            self.get_logger().info(f'语义感知未启用: {exc}')
+
+    def _sem_items(self, now):
+        """YOLO 类别 + 深度测距 -> [(绝对方位 rad, 距离 m, 类别)], 喂给规划器的语义闸。
+
+        检测框只有像素坐标, 距离得问深度: 框中心落在哪个方位, 就去那条深度弧上
+        取读数。像素 -> 角度按 hfov 线性换算 (60 度铺满整幅宽)。针孔投影其实是
+        tan 关系, 线性换算在画面边缘会偏, 但语义闸只关心「是不是正前方那一个」,
+        25 度容差足够吸收这点误差。
+
+        目前只认 person: 车在场景里基本静止, 和平移障碍没区别; 人的特殊性在于
+        会突然迈步, 这才是值得为它单独放宽距离的类别。其余类别照旧走几何。
+        """
+        if not self._dets:
+            return []
+        wh = self._view_wh
+        # _view_wh 只有订阅了 VLM 相机图才会填 (那是 llm_vision 的事), 而语义刹车
+        # 不该依赖它: 检测框本来就是相机原图坐标, 宽度用参数兜底即可。
+        w = float(wh[0]) if (wh and wh[0]) else float(self.cam_w)
+        hfov = self.avoider.cfg.hfov
+        out = []
+        for name, score, cx, cy, bw, bh in self._dets:
+            if score < 0.35 or name != 'person':
+                continue
+            rel = (cx / w - 0.5) * hfov
+            a = wrap_pi(self.yaw.value + rel)
+            d = self.avoider._depth_abs_min(a, now, 6.0)
+            if d is None or not math.isfinite(d):
+                continue
+            out.append((a, float(d), name))
+        return out
+
     def _draw_dets(self, img):
         """把 YOLO 框画到已缩放的 VLM 图上 (框是原图坐标, 按宽度比例缩)。
 
@@ -982,20 +1156,15 @@ class Navigator(Node):
         dx, dy = gx - self.x, gy - self.y
         dist = math.hypot(dx, dy)
 
-        # ---- 抢占检测: 半秒内反而离目标更远 > 25 cm -> 有别人在驱动底盘 ----
+        # ---- 离目标变远: 只记录, 不中止 ----
+        # 原来这里判「STEAL_WINDOW 内 dist 反而增 STEAL_GROW -> 有别人在驱动底盘」并 cancel,
+        # 本意是有人抢方向盘时别跟人抢。但主动撤退/绕远路在「到目标距离」这条曲线上
+        # 和劫持长得一模一样: utrap 三面墙实测, 车已经从槽底退出 2.67 m (y 2.20 -> -0.47),
+        # 出口就在身后, 却因为「5.67 变 5.97 m」被判 Перехват и навигация прервана。
+        # 绕远是为了更好地到达 —— 距离非单调不是失败, 是绕行的定义。
+        # 真正的劫持判据在下面「指令 vs 实测 > 1.0 m」: 底盘没听我的才算被人接管。
         now = time.time()
-        if self.steal_since is None:
-            self.steal_since = (now, dist)
-        else:
-            ref_t, ref_dist = self.steal_since
-            if now - ref_t >= STEAL_WINDOW:
-                if dist > ref_dist + STEAL_GROW:
-                    self.get_logger().warn(
-                        f'Перехват управления (до цели было {ref_dist:.2f} м, стало {dist:.2f} м, '
-                        f'ушли назад на {dist - ref_dist:.2f} м), навигация прервана')
-                    self.cancel('перехват управления (клавиатура/объезд)')
-                    return
-                self.steal_since = (now, dist)
+        self.steal_since = (now, dist)
 
         # ---- 运动律: 只会「原地转向」和「沿车头前进」, 不横移 (与键盘控制同一思路) ----
         # 指令必须是内部累积量: 位置伺服有滞后, 若按「实测 + 增量」递推, 指令永远贴着实测,
@@ -1036,10 +1205,27 @@ class Navigator(Node):
                 # 地图先算「该往哪走」: 把 A* 折线上车前方 1.5 m 的点当本拍方向。
                 # 没有前视点 (栅格空 / 算不出路) 时 aim=None, 行为与纯 VFH 完全一致。
                 aim = self._grid_aim(now, gx, gy, have_scan)
+                self.avoider.set_semantic(self._sem_items(now))
                 plan = self.avoider.update(self.x, self.y, self.yaw.value,
                                            (gx, gy), self.sectors, now,
                                            scan=self._scan if have_scan else None,
                                            aim=aim)
+                # ---- 语义否决: 红灯 ----
+                # 与几何无关的一道门: 几何说「前方畅通」, 模型说「现在不能过」。
+                # 只拦位移不拦转向, 所以不会像行人闸那样把车钉死 —— 红灯变绿
+                # 时模型自己会改口, 条件是外部解除的, 不是靠车挣扎出来的。
+                if self._traffic_stop:
+                    if self._need_line_stop(gx, gy):
+                        plan.advance = False
+                        # 也不许转: 车头一转, 信号灯就出了 60 度视野, 模型下一拍只会
+                        # 说「看不到」—— 证据被自己的转向抹掉了 (实测 DODGE +122 deg
+                        # 之后立刻判「无信号灯」放行)。停车期间锁住车头, 灯始终在画面里。
+                        plan.heading = self.yaw.value
+                        plan.reason = '%s [红灯: 停在停止线后]' % plan.reason
+                    else:
+                        # 红灯, 但还没到线: 继续朝线开, 只是不许绕行/后退。
+                        plan.reason = '%s [红灯: 驶向停止线 y=%.1f]' % (
+                            plan.reason, self.traffic_line_y - self.traffic_line_gap)
                 # ---- 深度贴脸快速脱困 ----
                 # 矮障碍(0.10 m 高)整个在雷达扫描面之下(雷达 z=0.235), 几何判
                 # 「前方通畅」, 只有深度相机看得见。原来全靠二级 stall 判据
@@ -1293,6 +1479,10 @@ class Navigator(Node):
             self._stall_hist.append((t_st, self.x, self.y))
             while self._stall_hist and t_st - self._stall_hist[0][0] > self._stall_abort:
                 self._stall_hist.popleft()
+            # 语义停车 (红灯) 期间「不动」是正确行为, 不是卡死。
+            # 不清空历史只清时间窗: 红灯解除后重新开始计, 不会被前一段静止拖累。
+            if self._traffic_stop:
+                self._stall_hist.clear()
             if (len(self._stall_hist) > 50
                     and t_st - self._stall_hist[0][0] >= self._stall_abort * 0.95):
                 _t0, sx, sy = self._stall_hist[0]

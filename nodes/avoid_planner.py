@@ -28,10 +28,19 @@ import math
 NAV = 'NAV'        # 朝最终目标走
 DODGE = 'DODGE'    # 朝让开障碍的方向走
 HOLD = 'HOLD'      # 不走 (可能仍在原地转头观察), 等障碍让开
+SCAN = 'SCAN'      # 原地匀速转一圈: 深度视野只有 +/-30 度, 侧后方从来没测过
 
 INF = float('inf')
 GRID_DEG = 10.0
 N_GRID = int(round(360.0 / GRID_DEG))
+
+# 深度「转一圈」环记忆。单帧深度只有车头 +/-30 度, 侧方永远是「没测过」——
+# 模型拿到的 L/R 于是全 none, 它只能在无信息下瞎选一边。车头原地转一圈只要
+# 1.6 s (w_max=1.0 rad/s), 转头本身就是扫描, 把这些帧按绝对方位拼起来即可。
+RING_BUCKET = 30.0   # 环记忆的方位桶宽 (deg)
+RING_TTL = 15.0      # 一条环记录的存活时间 (s)。原 6.0: 扫一圈就要 7.4 s,
+                     # 0 度那一格会在扫完之前先过期, 等于白扫。
+RING_SHIFT = 0.60    # 车挪出这个距离就整环作废 (方位会错位)
 
 
 def wrap_pi(a):
@@ -80,13 +89,14 @@ class Config:
                               # 1-3 s 之间抖动, 那等于把抖动量直接喂进转向。
     commit_max: float = 3.5   # 一个绕行方向最多坚持这么久 (s): 到点必须回头看一眼目标
     commit_span: float = 60.0  # 坚持期间允许沿同一侧把绕行角加大到这么多度
-    back_limit: float = 100.0 # 最多允许偏离目标方向多少度 (deg), 超出就当看不见
-                              # 130 时车会转头 ±160 去看身后: 看了也不许开过去(go_limit),
-                              # 白转一趟再转回来, 日志里一秒换一个方向就是它。
-    go_limit: float = 100.0   # 真正**开出去**的方向最多偏目标多少度 (deg): 更偏的只许转头看
-                              # 110 度时车会朝侧后方"倒着绕", 一趟 3.5 m 走成 7.2 m (实测);
-                              # 85 度则贴到障碍前就没路了 —— 车不能侧移, 贴脸时只剩 ±90 可选。
-                              # (90 度能砍掉倒车, 但 3m 宽墙要横移 1.5m+, 会卡死; 110 两头都过)
+    back_limit: float = 180.0 # 最多允许偏离目标方向多少度 (deg), 超出就当看不见。
+                              # 原为 100: 那时 go_limit 也是 100, 转头看身后纯粹白甩头。
+                              # 现在两个都放开到 180 —— 死胡同的出口常在背后。
+    go_limit: float = 180.0   # 真正**开出去**的方向最多偏目标多少度 (deg): 更偏的只许转头看。
+                              # 原为 100 (注释记着 110 时"3.5 m 走成 7.2 m")。那是拿
+                              # 开阔地的效率换死胡同的活路 —— 用户口径: 绕远是为了更好地到达。
+                              # 搜索顺序仍是 |deg| 从小到大, 所以这只扩大候选池, 不会
+                              # 一上来就往背后开: 小角度能走就绝不看大角度。
     look_hold: float = 2.5    # 「转过去看」这个动作要粘住这么久 (s): 转向约 1 rad/s,
                               # 转 90 度要 1.6 s, 每周期重算会让车头原地抖 (实测 ±100 度翻)
     look_deadline: float = 4.0  # 一次「转过去看」最多看这么久 (s); 超时说明那不是
@@ -95,9 +105,38 @@ class Config:
                                 # HOLD 只转不走, 原地钉了 90 s。
     step_deg: float = 10.0    # 方向搜索步长 (deg)
     fuse_depth: bool = False  # 有雷达时是否仍把深度图并进记忆; 默认关, 理由见 _merge_depth
-    depth_reach: float = 1.80  # 深度「看见矮物」就算数的距离 (m)。原来是 safe_dist+margin+lookahead
+    depth_reach: float = 2.20  # 深度「看见矮物」就算数的距离 (m)。原 1.80。原来是 safe_dist+margin+lookahead
                               # = 1.40, 车 0.5 m/s 走过去只有 2.8 s, 而绕开 0.8 m 宽的箱子要横移
                               # 0.7 m (30 度偏角下 = 1.2 m 路程, 2.4 s) —— 刚好擦着撞上。1.8 m 留 3.6 s。
+    brake_dist: float = 0.55  # 深度正前方小于它 -> 立刻不许前进, 只许转 (m)。
+                              # 这是用户要的那条硬规则: 雷达说通不算数, 视觉看见就停。
+                              # 原设计里深度只打 '⚠ близко' 日志, 照走不误 —— 矮墙
+                              # 就是这么被顶上去的 (雷达从箱顶飞过, 压根不知道有东西)。
+    person_margin: float = 0.0   # 识别到「人」时, 额外要求的净空 (m)。默认 0 = 关闭。
+                              # 实测 0.80 会把开阔地里的一个人变成「一堵墙」: 人周围
+                              # 1.38-0.80=0.58 净空 < safe_dist, 扇区搜索认为无路可走,
+                              # 目标在人正后方时一路 HOLD/DODGE 绕不出来, 还把 LLM 拖进
+                              # 决策 (日志首次出现 [выбор: модель])。要真正发挥作用, 语义点
+                              # 应该注入局部栅格让 A* 绕, 而不是压缩扇区净空。
+                              # 同样是障碍, 人不可预测 (会突然迈步), 箱子不会。语义的
+                              # 价值就落在这一个数上: 箱子按 0.55 才刹, 人按 1.20 就刹。
+                              # 没有 YOLO 识别时这条不生效, 系统平滑退回纯几何。
+                              # 取 1.80 而不是 1.20: 几何在 2.1 m 处 (safe_dist+lookahead)
+                              # 就已经开始偏转了, 1.20 的语义闸永远赶不上 —— 实测人在正前
+                              # 方 4.6 m, 车一路绕开, 语义一次没触发。要让语义有存在感,
+                              # 它的门槛必须早于几何的偏转点, 且不超出深度量程 2.20。
+    scan_stop: float = 0.75   # 深度正前方小于它 -> 停车扫一圈 (m)。取 0.75 而不是
+                              # hard_dist 0.28: 贴到 0.28 才动手, 车已经停在障碍皮上,
+                              # 那时朝哪边转深度都是 0.4, 扫出来也没有"哪边能过"的答案。
+                              # p18 场景开局就在箱子前 0.5 m, 这一条让它一开工就扫。
+    scan_rate: float = 0.85   # 扫描角速度 (rad/s)。w_max = 1.0, 留 15% 余量免得追不上
+    scan_time: float = 7.4    # 扫满一圈的用时 (s) = 2*pi/0.85
+    scan_retry: float = 2.5   # 挪出这个距离 (m) 才允许在同一处再扫一次。原 1.0 太勤:
+                              # 走 1 m 就重扫一次 7.4 s, 用户看到的就是「遇到障碍就转圈」。
+                              # 配合 scan_cover 一起判, 环里数据够用就绝不重扫。
+    scan_cover: int = 6       # 环里有数据的格数 >= 它就不再扫 (满环 12 格)。开阔地
+                              # 只有 2-4 格, 那种情况才值得停下来补一圈。
+    scan_cooldown: float = 12.0  # 挪不动时的重扫间隔 (s): 扫完仍卡着, 十几秒后再看一眼
     scan_max: float = 9.0     # 激光雷达读数超过它就算「这一边空旷」(m)。
                               # 量程 12 m, 留 3 m 余量, 免得远处的墙被当成近处障碍。
     llm_ttl: float = 8.0      # 外部(LLM)意见有效期 (s)。4 s 实测不够: 车进了 commit
@@ -138,6 +177,9 @@ class AvoidPlanner:
         self.pref_src = ''        # 上一拍的选择理由来自谁: '' 几何 / 'llm' 模型的偏好
         self.tie_info = ''        # 最近一次「模型有没有资格开口」的现场, 供日志打印
         self._yaw = 0.0           # 最近一次 update 的车头朝向, 供 clearance() 换算绝对方位
+        self.sem = ()             # 语义危险点 [(绝对方位 rad, 距离 m, 类别)] — YOLO+深度
+        self.last_sem = ''        # 最近一次生效的语义刹车描述 (给日志用)
+        self._now = 0.0           # 最近一次 update 的时间戳, 供 _plan 里查深度
         self._side_hist = []      # (时间, 绕行方向) 最近几秒, 用来发现「来回换边」
         self._look_heading = None # 正在转过去看的那个方位 (rad); 粘住它, 别每帧换
         self._depth_confirm = {}  # 方位格 -> (上帧深度, 连续帧数); 相机读数要连续一致才采信
@@ -145,6 +187,15 @@ class AvoidPlanner:
         self._depth_front = None
         self._depth_front_t = 0.0
         self._depth_arc = ()       # ((相对车头方位 rad, 距离 m), ...) 左正右负, ROS 约定
+        self._depth_abs = ()       # 同上, 但存**绝对方位**: 车头一转不能让旧观测跟着转
+        self._last_sec = ()        # 上一帧深度扇区, 用来判断「这是新的一帧」还是同一帧在重复读
+        self._ring360 = {}         # 方位桶(deg) -> (距离 m, 时刻): 转头累积出来的全景深度
+        self._ring_pose = None     # 建这圈记忆时车停在哪 (x, y), 挪远了就作废重扫
+        self._scan_t0 = 0.0        # 本轮扫描开始时刻; 0 = 没在扫
+        self._scan_base = 0.0      # 本轮扫描的起始车头角 (rad)
+        self._scan_pose = None     # 上次扫完时站在哪 (x, y), 用来判「挪够了没有」
+        self._scan_last = -1e9     # 上次扫完的时刻, 兜底重扫间隔
+        self._scan_seq = 0         # 扫完过几轮: 0 = 环里还没有 360 度数据
         self._goal_dir = 0.0       # 本拍目标方位, 深度否决要锚在它上面 (见 _strict)
         # 正前方净空 (m), inf=空旷。上层据此决定「要不要报警」—— 判堵用的 1.40 m
         # 是提前打方向的量, 拿它当警报线会吓人; 真正会撞的线是 safe_dist。
@@ -188,10 +239,80 @@ class AvoidPlanner:
         vals = []
         step = max(int(GRID_DEG), 1)
         for d in range(-int(half_span), int(half_span) + 1, step):
-            v = self._mark(wrap_pi(self._yaw + math.radians(deg_rel + d)), now)
+            ang = wrap_pi(self._yaw + math.radians(deg_rel + d))
+            v = self._mark(ang, now)
             if v is not None:
                 vals.append(v)
+            # 深度弧也并进来: 雷达从 0.10 m 矮箱头顶飞过, 这一格在 marks 里
+            # 永远是空的, 「左/右哪边更空」于是无法回答 —— 模型的 L/C/R 全是
+            # none, 它的 LEFT/RIGHT 也就没有任何可对照的量。
+            # 这里只喂查询(模型输入 / 日志 / 报警), 不改 _feasible 的走廊判据。
+            dv = self._depth_abs_min(ang, now, 5.0)
+            if dv is not None:
+                vals.append(dv)
+            rv = self._ring_min(ang, now, 18.0)
+            if rv is not None:
+                vals.append(rv)
+            # 语义: 把「人」当成一个半径更大的障碍。几何看到的是 1.38 m 处一个
+            # 0.25 m 的点, 语义要求离它 0.80 m —— 于是这一片在规划眼里只剩
+            # 0.58 m, 比 safe_dist 还窄, 自然被绕开。
+            # 为什么是「压缩净空」而不是「禁止前进」: 底盘不能横移也不能倒车,
+            # 想绕过人就必须先朝人的方向转过去。一旦禁止前进, 车就只剩「转也不
+            # 敢转」这一条路 —— 实测目标正对人时连发 8 次 DODGE 却一步不动。
+            if self.sem and self.cfg.person_margin > 0.0:
+                _best = None
+                for _a, _d, _c in self.sem:
+                    if abs(wrap_pi(_a - ang)) < math.radians(half_span):
+                        _v = max(0.0, _d - self.cfg.person_margin)
+                        if _best is None or _v < _best:
+                            _best = _v
+                if _best is not None:
+                    vals.append(_best)
         return min(vals) if vals else None
+
+    def _ring_min(self, ang, now, span_deg):
+        """360 度环记忆在绝对方位 ang 附近的最小距离; None = 这一片还没扫到。
+
+        与 _depth_abs_min 的分工: 后者只看**当前这一帧** (±30 度), 转个头就没了;
+        这里看的是**转过的所有帧**拼起来的环, 侧方 60/90 度的数就是这么来的。
+        窗宽取半个桶多一点, 免得相邻桶之间漏一条缝。
+        """
+        if not self._ring360:
+            return None
+        span = math.radians(span_deg)
+        best = None
+        for k, (d, t) in self._ring360.items():
+            if now - t > RING_TTL:
+                continue
+            if abs(wrap_pi(math.radians(k) - ang)) <= span and (best is None or d < best):
+                best = d
+        return best
+
+    def set_semantic(self, items):
+        """喂语义危险点: [(绝对方位 rad, 距离 m, 类别名)] —— 由 YOLO 类别 + 深度测距得到。
+
+        为什么不直接在这里做图像识别: 规划器只认「哪个方位、多远」, 识别是
+        感知层的事。两边解耦之后, 换检测模型不用动避障逻辑, 关掉 YOLO 也只是
+        这个列表恒空 —— 语义是增强项, 不是依赖项。
+        """
+        self.sem = tuple(items or ())
+
+    def _depth_abs_min(self, ang, now, span_deg):
+        """深度弧在绝对方位 ang 附近最小的距离; None = 那一片深度没看到。
+
+        窗口取半个扇区(约 5 度): 一个弧点只代表它自己那一格的读数, 取太宽会把
+        「正前方贴脸」误算成「左右两侧也贴脸」, 模型反而更分不清该往哪边让。
+        """
+        if self._depth_front is None or not self._depth_abs:
+            return None
+        if now - self._depth_front_t > 2.5:
+            return None
+        span = math.radians(span_deg)
+        best = None
+        for a, d in self._depth_abs:
+            if abs(wrap_pi(a - ang)) <= span and (best is None or d < best):
+                best = d
+        return best
 
     def ring(self, now, step=None, half_span=14.0):
         """相对车头一整圈的净空 (m), 从 0 度起按 step 递增 —— 喂给 LLM 的「状态」。
@@ -242,6 +363,7 @@ class AvoidPlanner:
 
     # ---------------- 主入口 ----------------
     def update(self, x, y, yaw, goal, sectors, now, speed=0.0, scan=None, aim=None):
+        self._now = now           # _plan 里查深度弧要用 (出口规则拿不到 now 参数)
         """每周期调用一次, 返回本周期车头该指哪儿、能不能往前挪。
 
         x, y, yaw : 实测位姿 (yaw 弧度)
@@ -255,6 +377,7 @@ class AvoidPlanner:
                     算出来了, 这里只负责朝下一段走; 到点判定仍然用 goal
         """
         c = self.cfg
+        self._now = now          # 供 _plan 的刹车闸判深度读数是否还新鲜
         self.block_why = ''
         self._yaw = yaw
         if self.side:               # 只在「真的在绕」时记一笔, 直线走不算换边
@@ -276,6 +399,14 @@ class AvoidPlanner:
         # 深度只有 +/-30 度视野, 进了记忆就会在车转头的瞬间被当成「这个方向也空了」。
         if sec:
             _vals = [v for v in sec if math.isfinite(v)]
+            if not _vals:
+                # 整个视野都是 inf = 这一段真的空。必须刷新成 INF, 否则上一次
+                # 「0.42 m 贴脸」会滞留到 2.5 s 过期, 车明明已经转过来了还被旧读数
+                # 钉着不准走 (刹车闸加上之后这一条就成了死锁源)。
+                self._depth_front = INF
+                self._depth_front_t = now
+                self._depth_arc = ()
+                self._depth_abs = ()      # 视野全空 = 前方真的没东西, 别让旧点继续刹车
             if _vals:
                 _d = min(_vals)
                 if _d < c.depth_reach:
@@ -292,6 +423,50 @@ class AvoidPlanner:
                         (c.hfov * 0.5 - _step * (i + 0.5), float(sec[i]))
                         for i in range(_n)
                         if math.isfinite(sec[i]) and sec[i] < c.depth_reach)
+                    # 同一帧深度在 50 Hz 控制环里会被重复读 3-4 次。绝对方位弧只在
+                    # 「换了一帧」时重建: 否则车头一转, 旧观测就跟着车头平移 —— 转头
+                    # 看一眼反而把「左边 0.42 m」搬到「右边 0.42 m」上去, 自己骗自己。
+                    if sec != self._last_sec:
+                        self._last_sec = sec
+                        self._depth_abs = tuple(
+                            (wrap_pi(yaw + c.hfov * 0.5 - _step * (i + 0.5)),
+                             float(sec[i]))
+                            for i in range(_n)
+                            if math.isfinite(sec[i]) and sec[i] < c.depth_reach)
+                        # ---- 转头 = 扫描: 把这一帧的 60 度弧并进 360 度环 ----
+                        # 车一挪位, 整环的绝对方位就全错位了 (贴在箱子左侧时记的
+                        # 「0 度有障碍」搬到右侧就不成立), 所以按位移整环作废重扫,
+                        # 而不是只让旧条目慢慢过期。
+                        if self._ring_pose is None:
+                            self._ring_pose = (x, y)
+                        else:
+                            _dxr = x - self._ring_pose[0]
+                            _dyr = y - self._ring_pose[1]
+                            if math.hypot(_dxr, _dyr) > RING_SHIFT:
+                                # 原来是整环清空。清空之后侧方立刻变回「没测过」,
+                                # 而 _scan_seq 还是 >0, _strict 以为扫过 —— 判据静默
+                                # 失效, 车就在盲区里往侧面开。改成按位移投影平移:
+                                # 方向不变, 距离减去位移在该方位上的分量, 走过的格子
+                                # 自然归零删除。和 _shift_marks 同一个道理。
+                                _dead = []
+                                for _k, (_d, _t) in list(self._ring360.items()):
+                                    if now - _t > RING_TTL:
+                                        _dead.append(_k)
+                                        continue
+                                    _ang = math.radians(_k)
+                                    _nd = _d - (_dxr * math.cos(_ang) + _dyr * math.sin(_ang))
+                                    if _nd < 0.15:
+                                        _dead.append(_k)
+                                    else:
+                                        self._ring360[_k] = (_nd, _t)
+                                for _k in _dead:
+                                    self._ring360.pop(_k, None)
+                                self._ring_pose = (x, y)
+                        for _a, _d in self._depth_abs:
+                            _k = int(round(math.degrees(_a) / RING_BUCKET)) * RING_BUCKET
+                            _old = self._ring360.get(_k)
+                            if _old is None or _d < _old[0]:
+                                self._ring360[_k] = (_d, now)
         # 看到后记忆保留 2.5 s: 深度只有 +/-30 度视野, 车一转头箱子就出画。
         # 立刻清空的话, 车会马上「转回去看一眼」-> 又看到 -> 再转走, 左右摆头一步不挪
         # (这个坑在 look_hold 上也踩过一次)。2.5 s 足够以 0.5 m/s 走出 1.2 m 绕开。
@@ -299,6 +474,8 @@ class AvoidPlanner:
             self._depth_front = None
             self._depth_front_t = 0.0
             self._depth_arc = ()
+            self._depth_abs = ()
+            self._last_sec = ()
         # 正前方净空: 深度优先 (雷达从矮物头顶飞过, 看不见它们), 没有深度就退回雷达。
         self.front_gap = INF
         if self._depth_front is not None:
@@ -337,6 +514,50 @@ class AvoidPlanner:
             if math.hypot(ax - x, ay - y) > 1e-6:
                 goal_dir = math.atan2(ay - y, ax - x)
         self._goal_dir = goal_dir
+        self._dist_goal = dist_goal
+
+        # ---------------- 近距停车扫描 ----------------
+        # 深度相机看得见雷达看不见的矮物 (雷达在 z=0.235 m, 从 0.10 m 高的箱顶飞过去),
+        # 但它只有 +/-30 度视野。正前方 0.5 m 有墙时, 车知道「前面堵了」, 却不知道
+        # 「左/右/后哪边通」—— 那些方位从来没进过画面, clearance() 读到的是「没测过」
+        # 而不是「空旷」。于是 _choose 只能靠猜, 模型拿到的 L/R 也全是 none。
+        # 车头原地转一圈 (w_max=1 rad/s) 就等于把 360 度全测一遍: 每帧深度按绝对方位
+        # 累进 _ring360, 转完就是一张完整的环扫图。扫完再决策, 这才是「停下来看清楚」。
+        dscan = self._depth_front
+        if self._scan_t0 != 0.0:
+            # 已经开扫: 必须扫完再走。中途若拿 dscan 重判, 车头一转箱子就出画,
+            # _depth_front 2.5 s 后过期变 None, 扫描会被自己打断, 白转半圈。
+            swept = now - self._scan_t0
+            if swept < c.scan_time:
+                self.state = SCAN
+                return self._plan(
+                    SCAN, wrap_pi(self._scan_base + swept * c.scan_rate),
+                    goal_dir, 0, False,
+                    'scan %.0f%% (d=%s m, 环里 %d 格)'
+                    % (100.0 * swept / c.scan_time,
+                       '%.2f' % dscan if dscan is not None else '-',
+                       len(self._ring360)),
+                    dscan if dscan is not None else INF)
+            self._scan_t0 = 0.0
+            self._scan_pose = (x, y)
+            self._scan_last = now
+            self._scan_seq += 1
+        elif (dscan is not None and dscan < c.scan_stop
+              # 正对着固定窄缝时不扫: 缝是通的, 侧方数据早就由 _narrow 用原始射线
+              # 精确量过了 (缝宽/中线/中间有没有人), 再站这儿转 7.4 s 纯属浪费 ——
+              # 用户看到的就是「遇到障碍就转圈」。
+              and self._narrow(now) is None
+              and self._ring_cov(now) < c.scan_cover
+              and (self._scan_pose is None
+                   or math.hypot(x - self._scan_pose[0],
+                                 y - self._scan_pose[1]) > c.scan_retry
+                   or now - self._scan_last > c.scan_cooldown)):
+            self._scan_t0 = now
+            self._scan_base = yaw
+            self.state = SCAN
+            return self._plan(SCAN, yaw, goal_dir, 0, False,
+                              'scan start: %.2f m 内有东西, 先原地转一圈' % dscan,
+                              dscan)
 
         near_now = self._mark(yaw, now)
         if near_now is not None and near_now < c.hard_dist:
@@ -617,11 +838,52 @@ class AvoidPlanner:
         # 锚在**目标方向**而不是当前车头: 车一转到绕行方向, 那个方向就成了「正前方」,
         # 拿车头当参考的话它会立刻否决自己刚选的绕行道 —— 实测 +30/-30/+20/-20 每秒
         # 翻一次、原地摆头 10 s (lb10)。真正要禁的是「朝矮障碍直冲」, 障碍就在目标方向上。
+        # 环扫判据: 扫过一圈之后, 360 度每一格都是实测的。矮墙在雷达上完全透明
+        # (射线从 0.10 m 的箱顶飞过), 却实打实占着 0~70 度这一片 —— 不拿环说话,
+        # _choose 会一直挑 +30 度冲上去, 而那正是撞上去的角度。
+        # 只在扫过之后启用: 没扫过时环里只有车头那 60 度, 拿它判侧面等于把
+        # 「没测过」当成「堵死」, 车会原地钉住 —— 这正是 fuse_depth 当年翻车的原因。
+        if self._scan_seq > 0:
+            _rd = self._ring_at(ang, now)
+            # 阈值用 safe_dist + lookahead (1.15 m) 而不是 safe_dist (0.60):
+            # 环记的是「沿这条射线多远碰到东西」, 而车是沿车头直行的 —— 0.8 m 处
+            # 才碰的方位, 以 0.5 m/s 走过去只剩 1.6 s, 而掉头要 1.5 s。等它读到 0.6
+            # 再否决, 车身已经进了障碍投影。1.15 m 才是「还来得及改主意」的距离。
+            # 例外: 这一步只需要走到目标, 而目标就在那个东西之前 —— 那不算堵。
+            # 少了这一条, 车绕到箱子后面 (离目标 0.35 m) 时, 环里记着的 0.75 m
+            # 会把目标方向一直否决掉, 于是原地 look 到死 (实测 45 s 判卡)。
+            _near_goal = (abs(wrap_pi(ang - self._goal_dir)) < math.radians(30.0)
+                          and _rd is not None and _rd > self._dist_goal + 0.10)
+            if _rd is not None and _rd < c.safe_dist + c.lookahead and not _near_goal:
+                self.block_why = 'ring %.2f m' % _rd
+                return False
         if (self._depth_front is not None
                 and abs(wrap_pi(ang - self._goal_dir)) < math.radians(24.0)):
             self.block_why = 'depth %.2f m' % self._depth_front
             return False
         return True
+
+    def _ring_cov(self, now):
+        """环里还有几格是新鲜的 (0 ~ 12)。扫描就是为了把它填满, 填够了就别再扫 ——
+        开阔地一路走下来只有 2-4 格有数据, 那种情况才值得停下来补一圈。"""
+        n = 0
+        for _v in self._ring360.values():
+            if now - _v[1] <= RING_TTL:
+                n += 1
+        return n
+
+    def _ring_at(self, ang, now):
+        """某方位那一格的实测距离 (绝对方位, 30 度一格); None = 那格没数据。
+
+        和 _ring_min 的分工: _ring_min 取整个扇区的最小值 (给 clearance 显示用, 宁可
+        保守); 这里只取**角心最近的那一格** —— 拿它当可行性判据时必须精确到格, 否则
+        +80 度这一格明明空着, 也会被隔壁 +60 度那格的 0.21 m 墙连累成「堵死」。
+        """
+        k = int(round(math.degrees(ang) / RING_BUCKET)) * RING_BUCKET
+        v = self._ring360.get(k)
+        if v is None or now - v[1] > RING_TTL:
+            return None
+        return v[0]
 
     def _narrow(self, now):
         """本拍是否正对着一条「固定窄缝」: 两侧各有一段障碍、中间只剩一条比 side_gap
@@ -949,6 +1211,43 @@ class AvoidPlanner:
         return None
 
     def _plan(self, state, heading, goal_dir, side, advance, reason, clear=INF):
+        # ---- 深度刹车闸 (出口硬规则) ----
+        # 雷达 360 度全刷新, 却对 0.10 m 高的箱子完全免疫 (光束从箱顶飞过)。
+        # 所以「能不能往前走」不能只由雷达决定: 这一拍只要深度报出 0.55 m 内
+        # 有东西, 就不许位移 —— 方向照给 (还要靠转向绕开), 但脚不动。
+        # 放在出口而不是各个分支里, 是为了让所有决策路径 (NAV/DODGE/模型接管/
+        # 窄缝) 都必须过这一关, 不会漏掉某一条。
+        if advance:
+            # 只看**车头正前方** +/-15 度, 不能用全视野最小值 self._depth_front:
+            # 那个取的是整幅图最近的一点, 在 0.70 m 的窄缝里两侧墙离车只有 0.15 m,
+            # 于是缝明明通着、正前方空着, 刹车照踩 —— 车就再也穿不过走廊了
+            # (用户实测: 任务1 输入 (0,5) 变成绕行)。
+            _fc = self._depth_abs_min(self._yaw, getattr(self, '_now', 0.0), 15.0)
+            if _fc is not None and math.isfinite(_fc) and _fc < self.cfg.brake_dist:
+                advance = False
+                reason = '%s [brake %.2f m]' % (reason, _fc)
+                # 朝目标直行被拦 = 死锁: 车头已经对准目标 (err≈0), 导航层既不走
+                # 也不转, 就钉在这儿了 (实测 (0,4) 在距箱 0.55 m 处卡满 45 s)。
+                # 强制扭头 75 度, 把贴脸的障碍移出视野, 下一拍 _choose 重新选向。
+                if abs(wrap_pi(heading - self._goal_dir)) < math.radians(15.0):
+                    heading = wrap_pi(heading + math.radians(75.0))
+                    reason += ' -> 扭头'
+        # ---- 语义刹车闸 (出口硬规则) ----
+        # 和上面那道深度闸并排, 但门槛不同: 深度闸对「任何东西」都要求 0.55 m,
+        # 这里对「人」要求 1.20 m。差别就是语义的全部价值 —— 同样的几何, 认出
+        # 是人就该更早停。没有识别结果时 self.sem 为空, 这段不执行, 系统行为
+        # 与纯几何版本逐字节一致 (方便做消融对照)。
+        # 语义只做「记录」, 不再在这一层拦 advance: 拦了就把不能横移的车堵死
+        # (实测连发 8 次 DODGE 一步不动)。真正的作用点在 clearance(), 那里把
+        # 人周围的净空压缩 0.80 m, 规划自然绕开, 但转向自由不受影响。
+        self.last_sem = ''
+        if self.sem:
+            _near = [(_d, _c) for _a, _d, _c in self.sem
+                     if abs(wrap_pi(_a - heading)) < math.radians(12.0)]
+            if _near:
+                _d, _c = min(_near)
+                self.last_sem = '%s %.2f m' % (_c, _d)
+                reason = '%s [%s %.2f m]' % (reason, _c, _d)
         self.last_reason = reason
         return Plan(state=state, heading=wrap_pi(heading), goal_dir=goal_dir,
                     side=side, advance=advance, reason=reason, clear=clear,

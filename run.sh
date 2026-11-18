@@ -154,4 +154,25 @@ if [ -f "$ROOT/yolo_ros2_ws/install/setup.bash" ]; then
     source "$ROOT/yolo_ros2_ws/install/setup.bash"
 fi
 
-exec python3 -u "$ROOT/nodes/navigate_to_pose.py" "$@"
+# ---- 信号灯: light 场景自动开 (模型看图判断红/绿), 其它场景不开 ----
+# 判据: 场景里有没有灯球 lamp_red/lamp_green。TRAFFIC=0 可强制关掉,
+# LINE_Y / LINE_GAP 可改停止线位置与刹车距离 (默认 4.0 m / 0.60 m)。
+TRAFFIC="${TRAFFIC:-auto}"
+if [ "$TRAFFIC" = auto ]; then
+    if gz model --list 2>/dev/null | grep -q -- '- lamp_red'; then
+        TRAFFIC=1
+    else
+        TRAFFIC=0
+    fi
+fi
+LIGHT_ARGS=()
+if [ "$TRAFFIC" = 1 ]; then
+    echo "🚦 Сигнальный свет: ВКЛ — qwen3.5-9b 看图判红/绿, 红灯先开到停止线后停住"
+    LIGHT_ARGS=(-p traffic_mode:=true
+                -p "traffic_line_y:=${LINE_Y:-4.0}"
+                -p "traffic_line_gap:=${LINE_GAP:-0.60}")
+else
+    echo "🚦 Сигнальный свет: выкл (нет лампы в сцене или TRAFFIC=0)"
+fi
+
+exec python3 -u "$ROOT/nodes/navigate_to_pose.py" "$@" "${LIGHT_ARGS[@]}"

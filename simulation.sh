@@ -11,6 +11,7 @@
 #    bash simulation.sh test           场景回归: person lowbox sym mixed 全跑
 #    bash simulation.sh test mixed     只跑混合场景
 #    TX=0 TY=6 bash simulation.sh test 回归时把目标点改近
+#    TX=0 TY=4 bash simulation.sh test p18   只跑"近距矮墙"场景 (第 4 个场景)
 #
 #  停止: bash run.sh stop   (导航 / 桥 / 仿真 / YOLO / RViz 一起关)
 # =============================================================================
@@ -22,6 +23,9 @@ source /opt/ros/jazzy/setup.bash
 source "$ROOT/obstacle_ws/install/setup.bash" 2>/dev/null
 source "$ROOT/yolo_ros2_ws/install/setup.bash" 2>/dev/null
 export GZ_SIM_RESOURCE_PATH="$ROOT/mod:$ROOT/worlds/robots:${GZ_SIM_RESOURCE_PATH:-}"
+# 红绿灯面板插件 (worlds/scenes/light.sdf 里引用 filename="TrafficLight")。
+# 平时已装到 ~/.gz/gui/plugins, 这里再兜一层: 刚改过源码没 install 也能用。
+export GZ_GUI_PLUGIN_PATH="$ROOT/gui_plugins/traffic_light/build:${GZ_GUI_PLUGIN_PATH:-}"
 
 # ---------- 清残留 ----------
 clean_all() {
@@ -296,6 +300,8 @@ if [ "$CMD" = test ]; then
         case "$1" in
             person) echo "$ROOT/worlds/scenes/person.sdf" ;;
             lowbox) echo "$ROOT/worlds/scenes/low_box.sdf" ;;
+            light) echo "$ROOT/worlds/scenes/light.sdf" ;;
+            corridor) echo "$ROOT/worlds/scenes/corridor.sdf" ;;
             sym)    echo "$ROOT/worlds/scenes/symmetric.sdf" ;;
             mixed)  echo "$ROOT/worlds/scenes/mixed.sdf" ;;
             *)      echo "" ;;
@@ -332,6 +338,9 @@ if [ "$CMD" = test ]; then
             sleep 2
         done
         sleep 5
+        # light 场景: 回归要的是「能不能到」, 开局红灯会把车按在停止线后等到超时,
+        # 所以这里先切绿灯; 想专门测红灯停车, 手动 bash tools/light.sh red 再跑。
+        [ "$tag" = light ] && bash "$ROOT/tools/light.sh" green >/dev/null 2>&1
         timeout $NAV_T bash "$ROOT/run.sh" $GX $GY $extra > /tmp/nav_$tag.log 2>&1
         echo "[$tag] NAV_EXIT=$?"
         grep -E "Прибыл|Застрял|Таймаут" /tmp/nav_$tag.log | tail -1

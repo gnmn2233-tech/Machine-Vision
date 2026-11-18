@@ -50,7 +50,10 @@ Machine-Vision/
 │   ├── robot_pose.rviz               # RViz 配置（Fixed Frame=odom，带轨迹）
 │   └── requirements.txt              # 系统 Python 侧依赖
 ├── worlds/
-│   └── robot_with_camera.sdf         # Gazebo 世界 + 机器人模型（RGB 相机 + 深度相机）
+│   ├── robot_with_camera.sdf         # Gazebo 世界 + 机器人模型（RGB 相机 + 深度相机）
+│   └── scenes/                       # 测试场景：person / light / corridor / mixed / sym / ...
+├── gui_plugins/traffic_light/        # 自写 Gazebo GUI 插件：红绿灯切换按钮（C++ + QML）
+├── tools/                            # 小工具：抓帧 / 信号灯切换守护
 ├── mod/                              # 仿真用第三方模型（车辆 / 行人 / 地面等）
 ├── obstacle_ws/                      # colcon 工作区：避障节点 + depth_probe
 ├── vlm_navigator/                    # colcon 包：VLM 相机旋转
@@ -122,6 +125,57 @@ python3 nodes/robot_pose_monitor.py   # bash simulation.sh 已自动起；手动
 > `bash simulation.sh` 已经把它接成第 4 路，并且那个 RViz2 窗口本身就用本文的 `robot_pose.rviz`
 > 启动（Fixed Frame = `odom`）——所以**轨迹不用另开窗口**，跑 `bash simulation.sh` 就在 RViz2 里看到
 > `Path(/robot_path)` 的线和 `Odometry(/odom)` 的箭头；要看相机图仍照旧 Add → Image。
+
+## 红绿灯场景（点击切灯）
+
+```bash
+bash simulation.sh light     # 路口 + 停止线 + 红绿灯，界面里直接点按钮切灯
+```
+
+红绿灯是「两颗亮球 + 两颗固定黑球」：红灯位 z=1.17、绿灯位 z=0.73。要亮哪颗就把哪颗
+移到自己的灯位、另一颗沉到地下（z=-50）——「红灯亮时另一个是黑的」由底下的固定黑球保证，
+不用改材质。切灯三种方式：
+
+| 方式 | 操作 |
+|------|------|
+| 界面按钮 | 场景窗口**右侧栏最下面**的 `● ● STOP/GO` 面板，点红圆 / 绿圆 |
+| 命令行 | `bash tools/light.sh red` / `bash tools/light.sh green`，不用重启仿真 |
+| 话题 | `gz topic -p /traffic/cmd -t gz.msgs.StringMsg -m 'data: "toggle"'`，需先跑 `python3 tools/traffic_daemon.py` |
+
+按钮面板是自己写的 Gazebo GUI 插件（`gui_plugins/traffic_light/`，C++ 继承 `gz::gui::Plugin`
++ QML 画两个圆）。点一下直接调 `/world/default/set_pose`，不依赖任何额外进程。
+改过插件源码后跑 `bash gui_plugins/traffic_light/build.sh` 重编译并装到 `~/.gz/gui/plugins`，
+重开场景窗口生效。
+
+> 注意：world 文件里一旦写了 `<gui>` 段，就**完全替换**默认界面配置（默认那套 3D 视图、
+> 实体树等插件都不再自动加载），所以 `light.sdf` 里把默认 `gui.config` 整份抄了进去 ——
+> 以后升级 Gazebo 想同步默认界面，得重新拷一次。
+
+### 机器人怎么过这道灯
+
+`bash run.sh 0 9` 会自己认出这是红绿灯场景（场景里有灯球 `lamp_red` 就打开信号灯通道，
+其它场景不开）。通道打开后 qwen3.5-9b 每 3 s 看一帧 `/camera`，只回答「红灯 / 绿灯 / 看不到」：
+
+- **红灯** → 车先正常往前开，**开到停止线后停住**（不是杵在起点），停车期间锁住车头，让灯一直留在画面里；
+- **绿灯** → 放行，继续走到目标；
+- **看不到** → 维持上一次结论。车停在线前时车头可能把灯顶出 60° 画面，这条规则保证它不会因为「看不见」就自己开溜。
+
+| 想要 | 命令 |
+|------|------|
+| 红灯停线后、绿灯通过（默认） | `bash run.sh 0 9` |
+| 关掉信号灯通道 | `TRAFFIC=0 bash run.sh 0 9` |
+| 停得离停止线更远 / 更近 | `LINE_GAP=0.9 bash run.sh 0 9`（默认 0.60 m） |
+| 换一条停止线 | `LINE_Y=4.0 bash run.sh 0 9`（默认 4.0，对应 `stop_line` 的 y） |
+
+实测（目标 (0, 9)，路面畅通）：
+
+| 开局灯色 | 行为 | 结果 |
+|----------|------|------|
+| 红灯 | 车开到 **y=3.52** 停住（车头约 3.70 m，白线在 y=4.0），停了 30 s 不动，模型每 3 s 仍判「红灯」 | `bash tools/light.sh green` 后模型改口「绿灯 -> 放行」，车继续走，绕开灯杆 | 到达 y=9.00，误差 20 mm |
+| 绿灯 | 全程不停，直接穿过去 | 到达 y=8.99，误差 19 mm |
+
+`LINE_GAP` 定成 0.60 是量出来的：相机离地 0.28 m、60° 视场，车心停在 y≈3.4 时红灯球还在
+画面顶部，再往前一点就出画面，模型只会回「看不到」。
 
 ## 位置感知（机器人 / 相机位姿）
 
