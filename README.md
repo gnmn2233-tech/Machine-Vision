@@ -106,8 +106,6 @@ cd obstacle_ws && source /opt/ros/jazzy/setup.bash \
 ```bash
 bash simulation.sh        # 一键：仿真 + 键盘 + 话题桥 + YOLO + RViz + 定位（会先自动编译避障包）
 bash run.sh               # 另开终端·交互模式：之后每行输入 "x y [角度deg]" 依次出发
-bash run.sh 0 8           # 或直接给坐标：导航到 (0, 8)
-bash run.sh stop          # 收工：导航 / 桥 / 仿真 / YOLO / RViz 一起关
 ```
 
 > **LLM 顾问（可选）**：`run.sh` 默认 `LLM_ON=1`，连本地 LM Studio 的
