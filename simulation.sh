@@ -202,7 +202,12 @@ if [ "$CMD" = run ] || [ "$CMD" = gui ]; then
     ensure_pkg || exit 1
     echo ""
     echo "[1/5] Gazebo (с окном)..."
-    gz sim -r "$WORLD_FILE" &
+    # GUI 配置: 用仓库里这份 (默认 gui.config 的副本, DeepOrange 主题, 不带
+    # ResourceSpawner 面板)。不指定的话会读 ~/.gz/sim/8/gui.config —— 那份带着
+    # Resource Spawner, 启动时会去连 Fuel 拉 openrobotics 的资源清单 (1090 个),
+    # 界面和红绿灯场景不一致, 也明显更卡。light.sdf 内部内联了同一份 + 红绿灯
+    # 面板, sdf 里的 <gui> 优先于这里, 所以两边看起来是一致的。
+    gz sim -r --gui-config "$ROOT/config/gui_scene.config" "$WORLD_FILE" &
     SIM_PID=$!
     sleep 5
     echo "[2/5] Клавиатура..."
