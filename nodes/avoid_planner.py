@@ -68,6 +68,15 @@ class Plan:
 @dataclass
 class Config:
     hfov: float = 1.047       # 深度相机水平视场 (rad), 与 obstacle_avoider 一致
+    cam_pitch: float = 0.0    # 相机俯角 (rad, 向下为正)。装相机加了俯角就改这里,
+                              # 判障碍与反投影都靠它 —— 不改的话地面会被当成障碍。
+    corridor_half: float = 0.35  # 前进走廊半宽 (m)。只有落在这条走廊里的障碍才算
+                              # 「挡路」: 车半宽 0.20 + 两侧各 0.15 余量。旁边 45 度
+                              # 的箱子再近, 只要不在走廊里就不该让车停。
+    obs_z_min: float = 0.05   # 高于地面多少算障碍 (m)。0.10 m 矮箱实测反投影出来
+                              # 约 0.05 (投影模型与渲染的偏差), 地面约 0.00。
+                              # 2026-11-19 矮箱场景对比: 0.03 时走廊误报帧 42%, 0.05 保持
+                              # 召回 100%, 0.08 误报最低但离矮物只剩 2 cm 余量, 取 0.05。
     n_sectors: int = 9        # 视野被切成几个扇区
     safe_dist: float = 0.60   # 一个方向「够宽」的门槛 (m), 含车体与余量
     hard_dist: float = 0.28   # 车头正前方小于它 -> 立刻停 (m)
@@ -362,7 +371,8 @@ class AvoidPlanner:
         self.pref_src = ''
 
     # ---------------- 主入口 ----------------
-    def update(self, x, y, yaw, goal, sectors, now, speed=0.0, scan=None, aim=None):
+    def update(self, x, y, yaw, goal, sectors, now, speed=0.0, scan=None, aim=None,
+               corridor=None):
         self._now = now           # _plan 里查深度弧要用 (出口规则拿不到 now 参数)
         """每周期调用一次, 返回本周期车头该指哪儿、能不能往前挪。
 
@@ -477,8 +487,13 @@ class AvoidPlanner:
             self._depth_abs = ()
             self._last_sec = ()
         # 正前方净空: 深度优先 (雷达从矮物头顶飞过, 看不见它们), 没有深度就退回雷达。
+        # corridor 是「前进走廊内最近障碍」(compute_corridor), 比旧的「整幅图最小」
+        # 严格得多: 侧前方 45 度的东西不再被当成挡路。给了 corridor 就以它为准,
+        # 哪怕它是 inf —— inf 意味着「走廊里真的空的」, 不该回落到旧的整幅最小值。
         self.front_gap = INF
-        if self._depth_front is not None:
+        if corridor is not None:
+            self.front_gap = corridor if math.isfinite(corridor) else INF
+        elif self._depth_front is not None:
             self.front_gap = self._depth_front
         else:
             _fm = self._mark(yaw, now)
@@ -857,7 +872,14 @@ class AvoidPlanner:
             if _rd is not None and _rd < c.safe_dist + c.lookahead and not _near_goal:
                 self.block_why = 'ring %.2f m' % _rd
                 return False
-        if (self._depth_front is not None
+        # 距离要卡住: _depth_front 只要「视野里有东西」(depth_reach 2.20 m 以内) 就会
+        # 有值, 而这里原来只要它有值就否决目标方向 —— 于是 2.19 m 外的一团噪点也能
+        # 让车绕。2026-11-19 实测: light 场景往返时日志里全是
+        # 「DODGE +30 deg clear=inf front=inf [挡: depth 2.19 m]」, 前方明明空旷却每 3 s
+        # 偏一次 30 度, 走 2 m 就横移 1 m, 画出一个 ±1.2 m 的环; 关掉避障后轨迹是直线。
+        # 现在要求它真的进了判堵的 reach (与 marks 那条同口径) 才否决。
+        _reach = c.safe_dist + c.margin + c.lookahead
+        if (self._depth_front is not None and self._depth_front < _reach
                 and abs(wrap_pi(ang - self._goal_dir)) < math.radians(24.0)):
             self.block_why = 'depth %.2f m' % self._depth_front
             return False
@@ -1291,8 +1313,82 @@ def _zone_min(arr, mask, percentile, step=4):
     return float(np.percentile(vals, percentile))
 
 
+def _obstacle_mask_h(arr, cam_height=0.28, cam_hfov=1.047, pitch=0.0,
+                     z_min=0.05):
+    """按「离地高度」判障碍, 支持相机俯角。
+
+    旧版用「比同像素行的理论地面深度近 25%」判, 对矮物几乎全线失效:
+    0.10 m 矮箱在 1.6 m 处, 深度 1.58 m, 而该行理论地面是 1.94 m, 只近 18.6%
+    < 25% 阈值 -> 整块被当成地面滤掉 (2026-11-18 实测: 判为障碍的像素 0 个,
+    low_box 场景检出率 0% 的真因)。
+
+    现在把每个像素反投影回三维: 地面像素的高度恒为 0, 矮物顶面 0.10 m,
+    墙更高 —— 用高度区分, 与距离远近无关, 也不怕相机加了俯角。
+    """
+    import numpy as np
+    arr = _depth_array(arr) if not isinstance(arr, np.ndarray) else arr
+    if arr is None:
+        return None
+    # 无回波像素是 inf/nan: 直接乘 up 会 inf*0=nan 刷 RuntimeWarning, 先清零
+    # (清零后被 arr>0.35 与 z>z_min 过滤, 不影响判定)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    h, w = arr.shape[:2]
+    focal = (w / 2.0) / math.tan(cam_hfov / 2.0)
+    vs = (np.arange(h, dtype=np.float32) - h / 2.0) / focal   # tan(beta)
+    den = np.sqrt(1.0 + vs * vs)                 # 径向/Z 的比值
+    up = -vs / den                               # 向上的单位分量
+    if pitch:
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        up = up * cp - (1.0 / den) * sp          # 光轴下俯: 前向分量往下压
+    z = cam_height + arr * up[:, None]           # 世界高度
+    # >0.30 m: 深度相机装在车头前 0.10 m, 视场一放宽就会照到自己的车体,
+    # 不排掉的话「自车」会被当成 0.2 m 的障碍, 车永远不敢走。
+    ok = np.isfinite(arr) & (arr > 0.35)
+    return ok & (z > z_min)
+
+
+def compute_corridor(depth, cam_height=0.28, cam_hfov=1.047, pitch=0.0,
+                     half_width=0.35, max_range=2.2, z_min=0.05,
+                     min_range=0.25):
+    """深度图 -> 前进走廊里最近障碍的前向距离 (m), 没有就是 inf。
+
+    走廊 = 车头正前方一条宽 2*half_width 的长条。与「整幅图取最小值」的区别:
+    侧前方 45 度、0.7 m 的箱子不在走廊里, 不会把 front_gap 拉下来 (旧实现会,
+    于是车一看到旁边有东西就停车扫描或干脆不走)。
+
+    返回 (gap, 点数)。gap 是走廊内最近障碍的 x (前向) 距离。
+    """
+    import numpy as np
+    arr = _depth_array(depth) if not isinstance(depth, np.ndarray) else depth
+    if arr is None:
+        return INF, 0
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    h, w = arr.shape[:2]
+    focal = (w / 2.0) / math.tan(cam_hfov / 2.0)
+    # 针孔反投影: 深度是沿光轴的 Z, 先换成径向距离再分解, 不能直接 sin/cos 乘
+    # (画面边缘 Z 与径向能差 20% 以上, 会把地面算成障碍)
+    us = (np.arange(w, dtype=np.float32) - w / 2.0) / focal    # 右为正
+    vs = (np.arange(h, dtype=np.float32) - h / 2.0) / focal    # 下为正
+    den = np.sqrt(1.0 + us[None, :] ** 2 + vs[:, None] ** 2)
+    rng = arr * den                               # 径向距离
+    x = rng * (1.0 / den)                         # 前向
+    y = -rng * (us[None, :] / den)                # 侧向 (左为正)
+    up = -vs[:, None] / den                       # 向上分量
+    if pitch:
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        up = up * cp - (1.0 / den) * sp
+    z_world = cam_height + rng * up               # 离地高度
+    ok = (np.isfinite(arr) & (arr > min_range) & (arr < max_range)
+          & (z_world > z_min) & (x > 0.0) & (np.abs(y) <= half_width))
+    n = int(ok.sum())
+    if n == 0:
+        return INF, 0
+    return float(x[ok].min()), n
+
+
 def compute_sectors(depth, n_sectors=9, cam_height=0.28, cam_hfov=1.047,
-                    ground_ratio=0.75, percentile=10.0):
+                    ground_ratio=0.75, percentile=10.0, pitch=0.0,
+                    z_min=0.05):
     """深度图 -> 从左到右 n_sectors 个扇区的最近障碍距离 (m), inf=空旷。
 
     扇区按**角度**均匀切分 (不是按像素列): 针孔相机里列与角度是 tan 关系,
@@ -1303,7 +1399,8 @@ def compute_sectors(depth, n_sectors=9, cam_height=0.28, cam_hfov=1.047,
         return tuple(INF for _ in range(n_sectors))
     h, w = arr.shape[:2]
     focal = (w / 2.0) / math.tan(cam_hfov / 2.0)
-    mask = _obstacle_mask(arr, cam_height, cam_hfov, ground_ratio)
+    # 用高度判据而不是「比地面近 25%」: 矮物只有 0.10 m 高, 后者会把它们当地面
+    mask = _obstacle_mask_h(arr, cam_height, cam_hfov, pitch, z_min)
     out = []
     for i in range(n_sectors):
         a0 = -cam_hfov / 2.0 + cam_hfov * i / n_sectors

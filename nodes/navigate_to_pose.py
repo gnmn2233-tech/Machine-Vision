@@ -65,7 +65,7 @@ try:
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Image
     from avoid_planner import (AvoidPlanner, Config as AvoidConfig, DODGE, HOLD,
-                               NAV, Plan, compute_sectors)
+                               NAV, Plan, compute_sectors, compute_corridor)
     from grid_map import GridMap
     AVOID_OK = True
     AVOID_ERR = ''
@@ -195,6 +195,13 @@ class Navigator(Node):
         self.declare_parameter('avoid', True)              # 运动途中自动避障
         self.declare_parameter('avoid_depth_topic', '/depth_camera')
         self.declare_parameter('avoid_scan_topic', '/scan')   # 激光雷达: 给了就优先用它
+        # 深度判据的三个可调量 (见 avoid_planner._obstacle_mask_h / compute_corridor):
+        #   走廊半宽 (m) / 离地多高算障碍 (m) / 相机俯角 (deg, 向下为正)
+        self.declare_parameter('avoid_corridor_half', 0.35)
+        self.declare_parameter('avoid_z_min', 0.05)
+        self.declare_parameter('avoid_cam_pitch', 0.0)
+        # 判「堵」的提前量 (m): 越大越早开始绕, 弧也画得越大 (见 _strict)
+        self.declare_parameter('avoid_lookahead', 0.55)
         self.declare_parameter('llm', True)                 # 避障拿不定主意时问 LLM/VLM
         # 局部栅格 + A* (grid_map.py): 给 VFH 一层「该往哪走」。
         # 默认开。2026-11-04 之前这是一条「开了必卡」的坑: 深度补点投在车头
@@ -277,6 +284,11 @@ class Navigator(Node):
         self.avoid_depth_topic = str(self.get_parameter('avoid_depth_topic').value)
         self.avoid_on = AVOID_OK and self.avoid_wanted
         acfg = AvoidConfig()
+        # 深度判据现场可调: 改走廊宽度 / 障碍高度阈值 / 相机俯角都不必改代码
+        acfg.corridor_half = float(self.get_parameter('avoid_corridor_half').value)
+        acfg.obs_z_min = float(self.get_parameter('avoid_z_min').value)
+        acfg.cam_pitch = math.radians(float(self.get_parameter('avoid_cam_pitch').value))
+        acfg.lookahead = float(self.get_parameter('avoid_lookahead').value)
         # LLM_WEIGHT=0 等价于「几何永不判平局」-> 模型意见进不了决策, 用来跑 A/B 基线。
         # 默认 1: 只有两侧绕行偏角差 <= llm_tie_deg 时, 模型才有权改搜索顺序。
         if os.environ.get('LLM_WEIGHT', '1').strip().lower() in ('0', 'false', 'no', 'off'):
@@ -294,6 +306,7 @@ class Navigator(Node):
         self._glog_t = 0.0
         self.plan = None           # 本周期避障决策 (None = 不介入)
         self.sectors = None        # 9 个扇区的最近距离 (m), inf = 空旷
+        self.corridor_gap = None   # 前进走廊内最近障碍 (m), inf = 走廊空
         self._depth_t = 0.0
         self._depth_warned = False
         self.avoid_scan_topic = str(self.get_parameter('avoid_scan_topic').value)
@@ -356,6 +369,8 @@ class Navigator(Node):
         self._detour_side = 0        # 往哪边绕 (+1 左 / -1 右), 0 = 没在绕
         self._detour_heading = None  # 锁定的绝对绕行角 (None = 没在绕)
         self._detour_until = 0.0
+        # 换目标后的掉头窗口 (见 on_timer: 目标在身后时按目标方向转, 不采纳避障侧向)
+        self._uturn_until = 0.0
         self._detour_last = 0        # 上次往哪边绕, 用来「失败就翻边」
         self._detour_fail = 0        # 同一趟行程里连续卡住几次
         # 深度贴脸快速脱困: 见 on_timer 里同一行注释。_fg_since 是深度报警
@@ -367,7 +382,7 @@ class Navigator(Node):
         self._fg_quick = False
         self._last_stall_t = 0.0
         self._llm_ask_log_t = 0.0
-        self._pos_hist = []          # (时间, x, y): 判断「说在走却挪不动」
+        self._pos_hist = []          # (时间, x, y, yaw): 判断「说在走却挪不动」
         if self.avoid_on and self.llm_wanted and LLM_OK:
             hc = HintConfig.from_env()
             if hc.on:
@@ -446,7 +461,15 @@ class Navigator(Node):
             return
         try:
             arr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
-            self.sectors = compute_sectors(arr, n_sectors=self.avoider.cfg.n_sectors)
+            cfg = self.avoider.cfg
+            self.sectors = compute_sectors(arr, n_sectors=cfg.n_sectors,
+                                           pitch=cfg.cam_pitch,
+                                           z_min=cfg.obs_z_min)
+            # 前进走廊: 只有挡在车头这条长条里的东西才算「该停」。
+            # 旧版 front_gap 取整幅深度图的最小值, 侧前方 45 度的箱子也会把车按住。
+            self.corridor_gap, self._corridor_n = compute_corridor(
+                arr, pitch=cfg.cam_pitch, half_width=cfg.corridor_half,
+                max_range=cfg.depth_reach, z_min=cfg.obs_z_min)
             self._depth_t = time.time()
         except Exception as exc:
             if not self._depth_warned:
@@ -530,7 +553,7 @@ class Navigator(Node):
         # 车身顶在箱子上 15 s 也问不出一句话。改成只把 NAV 当作「flap/tie
         # 没意义」的开关, stall 判据照常跑。
         navigating = (plan.state == NAV)
-        self._pos_hist.append((now, self.x, self.y))
+        self._pos_hist.append((now, self.x, self.y, self.yaw.value))
         # 窗口 13 s: 二级 stall 判据要 12 s 的观察期, 窗口若只有 9.5 s
         # 就永远攒不出那么长的历史, 判据形同虚设。
         while len(self._pos_hist) > 2 and now - self._pos_hist[0][0] > 13.0:
@@ -572,14 +595,29 @@ class Navigator(Node):
                 and l2 is not None and r2 is not None
                 and min(l2, r2) >= 0.55 and abs(l2 - r2) < 0.45):
             trig = 'tie'
-        if not trig and plan.advance and self._pos_hist:
+        if self._traffic_stop:
+            # 红灯等灯不是卡死: 车停在线后一动不动是正确行为。实测 2026-11-19:
+            # 等 60 s 后绿灯放行, 期间 stall 判据每 12 s 就判一次「卡死」并把 16 s
+            # 的强制绕行窗口一直续着, 车一放行就往 90 度方向横移, 从 x=0 漂到
+            # x=-1.0, 到终点附近掉头时被判 Застрял。放行后从零开始攒历史。
+            self._pos_hist.clear()
+        elif not trig and plan.advance and self._pos_hist:
             # 真卡住才算: 8 秒挪不动 0.30 m。原先写「5 秒 0.60 m」太松 ——
             # 正常绕行时原地转向两秒也算 stall, 一趟 68 秒的行程问了 6 次,
             # 每次都白拉一次 9B, 日志被淹没, 也拖慢 GPU。
-            t0, x0, y0 = self._pos_hist[0]
+            t0, x0, y0, yaw0 = self._pos_hist[0]
             near = any(v is not None and math.isfinite(v) and v < 1.20
                        for v in (left, ahead, right))
             moved = math.hypot(self.x - x0, self.y - y0)
+            # 原地掉头不算卡死: 换目标时车先要转 180 度, 这十几秒位移本来就小于
+            # 0.15 m, 旧判据只看位移 -> 判 stall -> 打开 16 s 强制绕行 -> 车朝 90 度
+            # 方向直行, 画出一个 ±1.5 m 的大环 (2026-11-19 用户实测轨迹:
+            # 0,6 -> 0,0 -> 0,6, 每趟画一个环, 环画完车头早已转开, 信号灯出了视野)。
+            # 朝向变了 0.5 rad(29 度)以上就认为它在转身; 同时清历史, 免得转完之后
+            # 的下一拍又拿 12 s 前的旧坐标判一次卡死。
+            turned = abs(wrap_pi(self.yaw.value - yaw0))
+            if turned >= 0.5:
+                self._pos_hist.clear()
             # 两级判据。一级(原有): 贴近障碍却挪不动 —— 经典卡死。
             # 二级(新增): 雷达四周一片空旷(near=False), 车身却也挪不动 —— 这是
             # 矮障碍的指纹。low_box.sdf 的箱子高 0.10 m, 而雷达装在 z≈0.235,
@@ -592,7 +630,7 @@ class Navigator(Node):
             # 再次成立, 于是每来一次就把锁定角清掉、重新翻一次边 —— lb8 实测
             # 车在原地 +55/-55 每秒交替抽筋, 一步没挪。绕行窗口过期后
             # _detour_heading 会被清成 None, 那时才重新判。
-            if self._detour_heading is None and (
+            elif self._detour_heading is None and (
                     (now - t0 >= 8.0 and near and moved < 0.30) or
                     (now - t0 >= 12.0 and not near and moved < 0.15)):
                 trig = 'stall'
@@ -802,13 +840,18 @@ class Navigator(Node):
 
         判据用世界 y 坐标 —— 本场景线在 +y 方向(路灯杆与停止线都在车前),
         车从 y=0 出发朝 +y 走, 所以「车心 >= 线 - gap」就是压到线前了。
-        目标若不在线的对面(gy <= 线), 这条线和本次行车无关, 红灯照旧立刻停。
+        目标若不在线的对面(gy <= 线), 这条线和本次行车无关, 红灯不拦。
         没配线(traffic_line_y=0 或 gap<=0)时退回老行为: 红灯立刻停。
         """
         if self.traffic_line_gap <= 0.0 or self.traffic_line_y == 0.0:
             return True
         if gy <= self.traffic_line_y:
-            return True
+            # 目标还在停止线这一侧: 本次行车根本不用过线, 红灯与它无关, 不该拦。
+            # 原来这里返回 True(「红灯立刻停」), 于是给 (0,0) 这种回程目标时,
+            # 车明明已经越过线、只要往回走, 却被红灯钉在原地 (2026-11-19 复现:
+            # 停在 (0,6) 不动, stall 反复触发强制绕行, 车画出一个 ±1.5 m 的大圈,
+            # 车头转开之后模型看不到灯, 又判「无信号灯」放行 —— 自激)。
+            return False
         return self.y >= self.traffic_line_y - self.traffic_line_gap
 
     def _light_loop(self):
@@ -1076,6 +1119,10 @@ class Navigator(Node):
         self.goal_start = time.time()
         self.steal_since = None
         self._stall_hist.clear()            # 新目标: 卡死计时重新开始
+        # 换目标后的 5 s 内如果目标在身后, 允许绕过避障直接朝目标掉头 (见 on_timer)。
+        # 只在这个窗口里生效 —— 常驻判断会把走廊绕行时的侧向航向也覆盖掉, 实测
+        # corridor 场景 90 s 超时、往返在终点卡死 (2026-11-19 踩过)。
+        self._uturn_until = time.time() + 5.0
         gx, gy, gyaw = self.goal
         self.get_logger().info(
             f'Старт -> ({gx:+.2f}, {gy:+.2f})'
@@ -1209,7 +1256,9 @@ class Navigator(Node):
                 plan = self.avoider.update(self.x, self.y, self.yaw.value,
                                            (gx, gy), self.sectors, now,
                                            scan=self._scan if have_scan else None,
-                                           aim=aim)
+                                           aim=aim,
+                                           corridor=(self.corridor_gap
+                                                     if have_depth else None))
                 # ---- 语义否决: 红灯 ----
                 # 与几何无关的一道门: 几何说「前方畅通」, 模型说「现在不能过」。
                 # 只拦位移不拦转向, 所以不会像行人闸那样把车钉死 —— 红灯变绿
@@ -1381,7 +1430,18 @@ class Navigator(Node):
                     + (' [выбор: модель]' if self.avoider.pref_src == 'llm' else ''))
 
         # 近场锁定方向: 距离很小时 dx/dy 抖动会让 atan2 乱跳, 车头会在终点前乱转
-        if plan is not None:
+        goal_hdg = math.atan2(dy, dx) if dist > 1e-6 else self.yaw.value
+        # 刚换目标、目标又在身后: 先原地掉头, 不采纳避障给的侧向航向。
+        # 实测 0,6 -> 0,0 -> 0,6: 换目标瞬间避障一直在给 DODGE ±30 度, 车按它
+        # 边走边转, 每趟画一个 ±1.2 m 的弧; 车头转开后信号灯出了 60 度视野,
+        # 模型只能答「看不到」。只借避障的「能不能走」(advance), 方向用目标。
+        # 窗口只有 5 s 且只在换目标之后 —— 常驻判断会破坏走廊绕行 (见 _start_next)。
+        need_uturn = (now < self._uturn_until
+                      and abs(wrap_pi(goal_hdg - self.yaw.value))
+                      > math.radians(100.0))
+        if need_uturn:
+            self.want_heading = goal_hdg
+        elif plan is not None:
             self.want_heading = plan.heading    # 避障方向 (含「先转过去看一眼」)
         elif dist > NEAR_HEADING or self.want_heading is None:
             # dist 恰好为 0 (目标就是当前位置: 复位/空目标) 时不能留 None,
